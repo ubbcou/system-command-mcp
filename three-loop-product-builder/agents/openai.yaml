@@ -1,0 +1,4 @@
+interface:
+  display_name: "Three-Loop Product Builder"
+  short_description: "Build products through three feedback loops"
+  default_prompt: "Use $three-loop-product-builder to plan the next smallest product iteration from code, developer, and external feedback."
