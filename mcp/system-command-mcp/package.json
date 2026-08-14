@@ -1,0 +1,26 @@
+{
+  "name": "system-command-mcp",
+  "version": "0.1.0",
+  "description": "Cross-platform system command execution MCP server",
+  "type": "module",
+  "bin": { "system-command-mcp": "dist/src/cli.js" },
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": ["dist/src", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "start": "node dist/src/cli.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "cross-spawn": "^7.0.6",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}
