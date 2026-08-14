@@ -1,2 +1,5 @@
-config.yaml
+node_modules/
+dist/
+.npm-cache/
+*.log
 .DS_Store
