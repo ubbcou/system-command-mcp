@@ -135,7 +135,8 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       if (executable) { declaredCandidate = candidate; break; }
     }
     if (!executable || !declaredCandidate) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
-    programs[logicalName] = { logicalName, executable, declaredCandidate, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
+    const kind = /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native";
+    programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal-argv" : "cmd-reparsed" }; policies[logicalName] = definition.policy ?? {};
   }
   if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
   let closing = false;

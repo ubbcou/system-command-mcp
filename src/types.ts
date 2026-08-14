@@ -1,10 +1,13 @@
 export type ProgramKind = "native" | "cmd-script";
+export type ArgumentSemantics = "literal-argv" | "cmd-reparsed";
 
 export interface RegisteredProgram {
   logicalName: string;
   executable: string;
   declaredCandidate: string;
   kind: ProgramKind;
+  /** Native executables receive literal argv; cmd scripts are reparsed by cmd.exe. */
+  argumentSemantics: ArgumentSemantics;
 }
 
 export interface EnvironmentSnapshot {

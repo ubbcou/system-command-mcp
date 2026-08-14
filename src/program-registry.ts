@@ -98,7 +98,8 @@ export async function inspectEnvironment(options: RegistryOptions): Promise<Envi
         platform, path: options.path, pathExt: options.pathExt,
       });
       if (executable) {
-        programs[logicalName] = { logicalName, executable, declaredCandidate, kind: classifyProgram(executable) };
+        const kind = classifyProgram(executable);
+        programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal-argv" : "cmd-reparsed" };
         break;
       }
     }

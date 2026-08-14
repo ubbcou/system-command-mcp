@@ -37,8 +37,9 @@ test("stdio server lists dynamic programs and executes one", async () => {
     const programSchema = execTool?.inputSchema.properties?.program as { enum?: string[] } | undefined;
     assert.ok(programSchema?.enum?.includes("node"));
     const environment = await client.callTool({ name: "system_environment", arguments: {} });
-    const registered = (environment.structuredContent as { programs: Record<string, { declaredCandidate: string }> }).programs.node;
+    const registered = (environment.structuredContent as { programs: Record<string, { declaredCandidate: string; argumentSemantics: string }> }).programs.node;
     assert.equal(registered?.declaredCandidate, "node");
+    assert.equal(registered?.argumentSemantics, "literal-argv");
 
     const result = await client.callTool({
       name: "system_exec",
@@ -48,6 +49,10 @@ test("stdio server lists dynamic programs and executes one", async () => {
     const value = result.structuredContent as { exitCode: number; stdout: { text: string } };
     assert.equal(value.exitCode, 0);
     assert.match(value.stdout.text, /^v\d+/);
+
+    const nonzero = await client.callTool({ name: "system_exec", arguments: { program: "node", args: ["-e", "process.exit(7)"] } });
+    assert.equal(nonzero.isError, false);
+    assert.equal((nonzero.structuredContent as { exitCode: number }).exitCode, 7);
   } finally {
     await client.close();
   }

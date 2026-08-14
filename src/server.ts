@@ -11,7 +11,7 @@ export interface ServerOptions extends Omit<CommandRuntimeOptions, "roots"> {
 function environmentValue(snapshot: RuntimeEnvironment): Record<string, unknown> {
   return {
     platform: snapshot.platform, arch: snapshot.arch, cwd: snapshot.cwd, mode: snapshot.mode, roots: snapshot.roots,
-    programs: Object.fromEntries(Object.entries(snapshot.programs).map(([name, program]) => [name, { executable: program.executable, declaredCandidate: program.declaredCandidate, kind: program.kind }])),
+    programs: Object.fromEntries(Object.entries(snapshot.programs).map(([name, program]) => [name, { executable: program.executable, declaredCandidate: program.declaredCandidate, kind: program.kind, argumentSemantics: program.argumentSemantics }])),
   };
 }
 
@@ -40,7 +40,7 @@ export async function createServer(options: ServerOptions): Promise<McpServer> {
     return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value };
   });
   server.registerTool("system_exec", {
-    description: "Execute one Registered Program directly with literal arguments. Shell operators, pipelines, redirects, command substitution, and environment expansion are not supported.",
+    description: "Execute one Registered Program directly. Native executables receive literal arguments; Windows .cmd/.bat Platform Wrappers are reparsed by cmd.exe and do not provide arbitrary literal-argument fidelity. Shell operators, pipelines, redirects, command substitution, and environment expansion are not supported.",
     inputSchema: {
       program: programSchema.describe("Registered Logical Program name."), args: z.array(z.string()).optional().describe("Literal Argument Vector."),
       cwd: z.string().optional().describe("Single-root: relative or absolute; multi-root: authorized absolute path."),

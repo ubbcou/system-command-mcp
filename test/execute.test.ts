@@ -4,7 +4,7 @@ import { execPath } from "node:process";
 import test from "node:test";
 import { executeProgram } from "../src/execute.js";
 
-const nodeProgram = { logicalName: "node", executable: execPath, declaredCandidate: "node", kind: "native" as const };
+const nodeProgram = { logicalName: "node", executable: execPath, declaredCandidate: "node", kind: "native" as const, argumentSemantics: "literal-argv" as const };
 
 test("executeProgram passes arguments literally without a shell", async () => {
   const values = ["$HOME", "*.ts", "a && b", "中文 空格"];
@@ -83,6 +83,21 @@ test("executeProgram escalates after the configured Unix grace period", { skip: 
   assert.equal(result.termination?.gracefulRequested, true);
   assert.equal(result.termination?.forceUsed, true);
   assert.equal(result.termination?.treeCleaned, true);
+});
+
+test("Unix cleanup confirms only its process group, not an escaped descendant", { skip: process.platform === "win32" }, async () => {
+  const result = await executeProgram({
+    program: nodeProgram,
+    args: ["-e", "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',\"setInterval(()=>{},1000)\"],{detached:true,stdio:'ignore'}); child.unref(); console.log(child.pid); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],
+    cwd: process.cwd(), timeoutMs: 30, gracePeriodMs: 20, finalTerminationWaitMs: 500, maxOutputBytes: 1024,
+  });
+  const escapedPid = Number(result.stdout.text.trim());
+  try {
+    assert.equal(result.termination?.treeCleaned, true);
+    assert.doesNotThrow(() => process.kill(escapedPid, 0));
+  } finally {
+    try { process.kill(escapedPid, "SIGKILL"); } catch { /* escaped process already ended */ }
+  }
 });
 
 test("executeProgram lets exit claim completion before aborting prior to close", async () => {

@@ -37,10 +37,10 @@ function unixLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: 
       const gracefulError = signalGroup("SIGTERM");
       const gracefulRequested = gracefulError === undefined;
       const graceful = await confirmGone(gracePeriodMs);
-      if (graceful.cleaned) return { reason, gracefulRequested, forceUsed: false, treeCleaned: true, cleanupError: gracefulError, diagnostics: { adapter: "unix-process-group" } };
+      if (graceful.cleaned) return { reason, gracefulRequested, forceUsed: false, treeCleaned: true, cleanupError: gracefulError, diagnostics: { adapter: "unix-process-group", containment: "runner-created process group; descendants that create another session or process group escape containment" } };
       const forceError = signalGroup("SIGKILL");
       const forced = await confirmGone(finalWaitMs);
-      return { reason, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError, diagnostics: { adapter: "unix-process-group" } };
+      return { reason, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError, diagnostics: { adapter: "unix-process-group", containment: "runner-created process group; descendants that create another session or process group escape containment" } };
     },
     close() {},
   };
@@ -91,19 +91,19 @@ function windowsLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitM
       if (setupError || !job || !TerminateJobObject || !GetLastError) {
         const fallbackDiagnostic = await fallback();
         await Promise.race([rootClosed, wait(finalWaitMs)]);
-        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: setupError, diagnostics: { adapter: "windows-taskkill-fallback", fallback: fallbackDiagnostic } };
+        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: setupError, diagnostics: { adapter: "windows-taskkill-fallback", containment: "unconfirmed fallback traversal; no durable containment membership", fallback: fallbackDiagnostic } };
       }
       if (!TerminateJobObject(job, 137)) {
         const error = `TerminateJobObject: ${GetLastError()}`;
         const fallbackDiagnostic = await fallback();
         await Promise.race([rootClosed, wait(finalWaitMs)]);
-        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", fallback: fallbackDiagnostic } };
+        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; pre-assignment and breakaway processes can escape", fallback: fallbackDiagnostic } };
       }
       const rootExited = await Promise.race([rootClosed.then(() => true), wait(finalWaitMs).then(() => false)]);
       const accounting = Buffer.alloc(48);
       const queried = !!QueryInformationJobObject?.(job, 1, accounting, accounting.length, null);
       const activeProcesses = queried ? accounting.readUInt32LE(40) : undefined;
-      return { reason, gracefulRequested, forceUsed: true, treeCleaned: rootExited && activeProcesses === 0, cleanupError: queried ? undefined : `QueryInformationJobObject: ${GetLastError?.() ?? "unavailable"}`, diagnostics: { adapter: "windows-job-object", activeProcesses } };
+      return { reason, gracefulRequested, forceUsed: true, treeCleaned: rootExited && activeProcesses === 0, cleanupError: queried ? undefined : `QueryInformationJobObject: ${GetLastError?.() ?? "unavailable"}`, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; pre-assignment and breakaway processes can escape", activeProcesses } };
     },
     close() { if (processHandle) CloseHandle?.(processHandle); if (job) CloseHandle?.(job); },
   };
