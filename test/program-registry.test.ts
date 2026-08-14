@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,18 +7,18 @@ import { inspectEnvironment, resolveExecutable } from "../src/program-registry.j
 
 async function executable(dir: string, name: string): Promise<string> {
   const path = join(dir, name);
-  await writeFile(path, "#!/usr/bin/env node\n");
-  await chmod(path, 0o755);
+  await writeFile(path, "fixture");
   return path;
 }
 
 test("resolveExecutable uses candidate priority", async () => {
   const first = await mkdtemp(join(tmpdir(), "system-command-mcp-first-"));
   const second = await mkdtemp(join(tmpdir(), "system-command-mcp-second-"));
-  const expected = await executable(second, "python3");
-  await executable(first, "python");
+  const platform = "win32";
+  const expected = await executable(second, "python3.exe");
+  await executable(first, "python.exe");
   const actual = await resolveExecutable(["python3", "python"], {
-    path: [first, second].join(process.platform === "win32" ? ";" : ":"), platform: process.platform,
+    path: [first, second].join(";"), pathExt: ".EXE", platform,
   });
   assert.equal(actual, expected);
 });
@@ -38,7 +38,8 @@ test("resolveExecutable uses Windows PATH and PATHEXT semantics", async () => {
 
 test("inspectEnvironment exposes only installed logical programs", async () => {
   const dir = await mkdtemp(join(tmpdir(), "system-command-mcp-registry-"));
-  const path = await executable(dir, "real-tool");
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const path = await executable(dir, "real-tool" + suffix);
   const snapshot = await inspectEnvironment({
     cwd: dir, path: dir, aliases: { tool: ["real-tool"], missing: ["missing"] },
   });

@@ -37,19 +37,19 @@ class TailBuffer {
 export async function executeProgram(request: ExecuteRequest): Promise<ExecuteResult> {
   const stdout = new TailBuffer(request.maxOutputBytes);
   const stderr = new TailBuffer(request.maxOutputBytes);
-  let timedOut = false;
-  let cancelled = false;
+  let termination: "timeout" | "cancelled" | undefined;
 
   return new Promise<ExecuteResult>((resolve, reject) => {
     const child = spawn(request.program.executable, [...request.args], {
-      cwd: request.cwd, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+      cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     child.stdout?.on("data", (chunk: Buffer) => stdout.append(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.append(chunk));
+    if (request.input !== undefined) child.stdin?.end(request.input, "utf8");
     const stop = (): void => { if (!child.killed) child.kill(); };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, request.timeoutMs);
+    const timer = setTimeout(() => { if (!termination) { termination = "timeout"; stop(); } }, request.timeoutMs);
     timer.unref();
-    const onAbort = (): void => { cancelled = true; stop(); };
+    const onAbort = (): void => { if (!termination) { termination = "cancelled"; stop(); } };
     request.signal?.addEventListener("abort", onAbort, { once: true });
     child.once("error", (error) => {
       clearTimeout(timer);
@@ -59,7 +59,7 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
     child.once("close", (exitCode, signal) => {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onAbort);
-      resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut, cancelled });
+      resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
     });
   });
 }

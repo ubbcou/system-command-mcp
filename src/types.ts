@@ -20,6 +20,8 @@ export interface ExecuteRequest {
   timeoutMs: number;
   signal?: AbortSignal;
   maxOutputBytes: number;
+  input?: string;
+  environment?: NodeJS.ProcessEnv;
 }
 
 export interface StreamOutput {
