@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
-import { access } from "node:fs/promises";
-import { extname, isAbsolute, join } from "node:path";
+import { access, readdir, realpath } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import type { EnvironmentSnapshot, RegisteredProgram } from "./types.js";
 
 export const DEFAULT_ALIASES: Readonly<Record<string, readonly string[]>> = {
@@ -15,6 +16,7 @@ export interface RegistryOptions {
   path?: string;
   pathExt?: string;
   platform?: NodeJS.Platform;
+  manifestDirectory?: string;
 }
 
 function executableExtensions(platform: NodeJS.Platform, pathExt?: string): string[] {
@@ -36,26 +38,51 @@ async function isExecutable(path: string, platform: NodeJS.Platform): Promise<bo
   }
 }
 
+async function resolvedExecutable(path: string, platform: NodeJS.Platform): Promise<string | undefined> {
+  if (!await isExecutable(path, platform)) return undefined;
+  try { return await realpath(path); } catch { return undefined; }
+}
+
+async function windowsPath(path: string): Promise<string | undefined> {
+  try {
+    const name = (await readdir(dirname(path))).find(name => name.toLowerCase() === basename(path).toLowerCase());
+    return name && join(dirname(path), name);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveExecutable(
   candidates: readonly string[],
-  options: Pick<RegistryOptions, "path" | "pathExt" | "platform"> = {},
+  options: Pick<RegistryOptions, "path" | "pathExt" | "platform" | "manifestDirectory"> = {},
 ): Promise<string | undefined> {
   const platform = options.platform ?? process.platform;
   const pathDelimiter = platform === "win32" ? ";" : ":";
   const directories = (options.path ?? process.env.PATH ?? "").split(pathDelimiter).filter(Boolean);
-  const extensions = executableExtensions(platform, options.pathExt ?? process.env.PATHEXT);
+  const extensions = executableExtensions(platform, options.pathExt);
 
   for (const candidate of candidates) {
-    if (isAbsolute(candidate) && await isExecutable(candidate, platform)) return candidate;
+    const manifestRelative = candidate.startsWith("./") || candidate.startsWith("../");
+    if (manifestRelative && !options.manifestDirectory) throw new Error("MANIFEST_DIRECTORY_REQUIRED");
+    const file = candidate.startsWith("~/") ? resolve(homedir(), candidate.slice(2)) : manifestRelative ? resolve(options.manifestDirectory!, candidate) : candidate;
+    if (isAbsolute(file) || manifestRelative) {
+      const resolved = await resolvedExecutable(file, platform);
+      if (resolved) return resolved;
+      continue;
+    }
     for (const directory of directories) {
-      if (platform === "win32" && extname(candidate)) {
-        const path = join(directory, candidate);
-        if (await isExecutable(path, platform)) return path;
+      if (platform === "win32" && extname(file)) {
+        const resolved = await resolvedExecutable(join(directory, file), platform);
+        if (resolved) return resolved;
         continue;
       }
       for (const extension of extensions) {
-        const path = join(directory, platform === "win32" ? candidate + extension : candidate);
-        if (await isExecutable(path, platform)) return path;
+        const path = join(directory, platform === "win32" ? file + extension : file);
+        const actual = platform === "win32" ? await windowsPath(path) : path;
+        if (actual) {
+          const resolved = await resolvedExecutable(actual, platform);
+          if (resolved) return resolved;
+        }
       }
     }
   }
@@ -66,10 +93,15 @@ export async function inspectEnvironment(options: RegistryOptions): Promise<Envi
   const platform = options.platform ?? process.platform;
   const programs: Record<string, RegisteredProgram> = {};
   for (const [logicalName, candidates] of Object.entries(options.aliases ?? DEFAULT_ALIASES)) {
-    const executable = await resolveExecutable(candidates, {
-      platform, path: options.path, pathExt: options.pathExt,
-    });
-    if (executable) programs[logicalName] = { logicalName, executable, kind: classifyProgram(executable) };
+    for (const declaredCandidate of candidates) {
+      const executable = await resolveExecutable([declaredCandidate], {
+        platform, path: options.path, pathExt: options.pathExt,
+      });
+      if (executable) {
+        programs[logicalName] = { logicalName, executable, declaredCandidate, kind: classifyProgram(executable) };
+        break;
+      }
+    }
   }
   return { platform, arch: process.arch, cwd: options.cwd, programs };
 }

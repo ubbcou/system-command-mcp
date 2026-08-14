@@ -34,32 +34,68 @@ class TailBuffer {
   }
 }
 
-export async function executeProgram(request: ExecuteRequest): Promise<ExecuteResult> {
+export async function executeProgram(request: ExecuteRequest, options: { spawn?: typeof spawn } = {}): Promise<ExecuteResult> {
+  const spawnProcess = options.spawn ?? spawn;
   const stdout = new TailBuffer(request.maxOutputBytes);
   const stderr = new TailBuffer(request.maxOutputBytes);
-  let timedOut = false;
-  let cancelled = false;
+  let termination: "timeout" | "cancelled" | undefined;
+  let terminalClaimed = false;
+  let settled = false;
 
   return new Promise<ExecuteResult>((resolve, reject) => {
-    const child = spawn(request.program.executable, [...request.args], {
-      cwd: request.cwd, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    const child = spawnProcess(request.program.executable, [...request.args], {
+      cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
-    child.stdout?.on("data", (chunk: Buffer) => stdout.append(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.append(chunk));
-    const stop = (): void => { if (!child.killed) child.kill(); };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, request.timeoutMs);
-    timer.unref();
-    const onAbort = (): void => { cancelled = true; stop(); };
-    request.signal?.addEventListener("abort", onAbort, { once: true });
-    child.once("error", (error) => {
+    const onStdoutData = (chunk: Buffer): void => stdout.append(chunk);
+    const onStderrData = (chunk: Buffer): void => stderr.append(chunk);
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
+    let exited = false;
+    const stop = (): void => { if (!exited && !child.killed) child.kill(); };
+    const onAbort = (): void => claimTermination("cancelled");
+    const cleanup = (): void => {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onAbort);
+    };
+    const settleCleanup = (): void => {
+      cleanup();
+      child.stdout?.removeListener("data", onStdoutData);
+      child.stderr?.removeListener("data", onStderrData);
+    };
+    const claimTermination = (reason: "timeout" | "cancelled"): void => { if (!terminalClaimed) { terminalClaimed = true; termination = reason; stop(); } };
+    const internalFailure = (error: Error): void => {
+      if (settled) return;
+      terminalClaimed = true;
+      settleCleanup();
+      stop();
+      settled = true;
       reject(error);
+    };
+    const timer = setTimeout(() => claimTermination("timeout"), request.timeoutMs);
+    timer.unref();
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) onAbort();
+    child.once("exit", () => {
+      exited = true;
+      if (!terminalClaimed) {
+        terminalClaimed = true;
+        cleanup();
+      }
     });
+    child.on("error", internalFailure);
+    child.stdout?.on("error", internalFailure);
+    child.stderr?.on("error", internalFailure);
+    if (request.input !== undefined && child.stdin) {
+      child.stdin.on("error", internalFailure);
+      child.stdin.end(request.input, "utf8", () => {});
+    }
     child.once("close", (exitCode, signal) => {
-      clearTimeout(timer);
-      request.signal?.removeEventListener("abort", onAbort);
-      resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut, cancelled });
+      if (!settled) {
+        terminalClaimed = true;
+        settled = true;
+        settleCleanup();
+        resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
+      }
     });
   });
 }
