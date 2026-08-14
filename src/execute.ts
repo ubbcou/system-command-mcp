@@ -55,6 +55,9 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
     const cleanup = (): void => {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onAbort);
+    };
+    const settleCleanup = (): void => {
+      cleanup();
       child.stdout?.removeListener("data", onStdoutData);
       child.stderr?.removeListener("data", onStderrData);
     };
@@ -62,7 +65,7 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
     const internalFailure = (error: Error): void => {
       if (terminalClaimed) return;
       terminalClaimed = true;
-      cleanup();
+      settleCleanup();
       stop();
       settled = true;
       reject(error);
@@ -88,7 +91,7 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
       if (!settled) {
         terminalClaimed = true;
         settled = true;
-        cleanup();
+        settleCleanup();
         resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
       }
     });

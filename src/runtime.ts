@@ -51,7 +51,7 @@ function program(value: unknown, path: string, partial = false): ManifestProgram
   return { ...result, policy: policy(result.policy, `${path}.policy`), environment: layer(result.environment, `${path}.environment`) } as ManifestProgram;
 }
 function mergeLayer(base?: EnvironmentLayer, override?: EnvironmentLayer): EnvironmentLayer | undefined { return base || override ? { remove: override?.remove ?? base?.remove, set: { ...base?.set, ...override?.set } } : undefined; }
-function mergeProgram(base: ManifestProgram, override?: Partial<ManifestProgram>): ManifestProgram { return { ...base, ...override, candidates: override?.candidates ?? base.candidates, policy: { ...base.policy, ...override?.policy }, environment: mergeLayer(base.environment, override?.environment) }; }
+function mergeProgram(base: ManifestProgram, override?: Partial<ManifestProgram>): ManifestProgram { return { ...base, ...override, candidates: override?.candidates ?? base.candidates, required: base.required || override?.required, policy: { ...base.policy, ...override?.policy }, environment: mergeLayer(base.environment, override?.environment) }; }
 
 export function parseProgramManifest(value: unknown, platform: NodeJS.Platform = process.platform): ProgramManifest {
   const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "programs", "platforms"], "manifest");
@@ -78,6 +78,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
       if (!LOGICAL_PROGRAM_NAME.test(programName)) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.programs.${programName}`);
       const parsed = program(definition, `manifest.platforms.${name}.programs.${programName}`, true) as Partial<ManifestProgram>;
       if (!programs[programName]) throw new Error(`INVALID_MANIFEST: platform program ${programName} has no base definition`);
+      if (programs[programName].required && parsed.required === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be optional`);
       if (programs[programName].required && parsed.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be disabled`);
     }
     platformOverrides[name] = item;
@@ -85,6 +86,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const override = platformOverrides[platform] ?? {};
   const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
   for (const [name, item] of Object.entries(overrides)) programs[name] = mergeProgram(programs[name]!, program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>);
+  for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
   return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
 }
 
@@ -118,9 +120,14 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   for (const [logicalName, definition] of Object.entries(definitions)) {
     if (definition.enabled === false) continue;
     const perProgramEnvironment = { ...environment }; applyLayer(perProgramEnvironment, input, definition.environment, platform);
-    const executable = await resolveExecutable(definition.candidates, { platform, manifestDirectory, path: get(perProgramEnvironment, "PATH", platform), pathExt: get(perProgramEnvironment, "PATHEXT", platform) });
-    if (!executable) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
-    programs[logicalName] = { logicalName, executable, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
+    let executable: string | undefined;
+    let declaredCandidate: string | undefined;
+    for (const candidate of definition.candidates) {
+      executable = await resolveExecutable([candidate], { platform, manifestDirectory, path: get(perProgramEnvironment, "PATH", platform), pathExt: get(perProgramEnvironment, "PATHEXT", platform) });
+      if (executable) { declaredCandidate = candidate; break; }
+    }
+    if (!executable || !declaredCandidate) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
+    programs[logicalName] = { logicalName, executable, declaredCandidate, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
   }
   let closed = false;
   const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs, mode: configured ? "configured" : "automatic-discovery", roots, environmentNames: Object.keys(environment).sort() });

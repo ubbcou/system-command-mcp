@@ -63,15 +63,15 @@ test("Configured Mode requires required Programs while Optional Programs may be 
   } finally { await runtime.close(); }
 });
 
-test("Program Manifest validates required disabled definitions before and after platform merging", () => {
+test("Program Manifest preserves base required Programs through platform merging", () => {
   assert.throws(() => parseProgramManifest({
     version: 1, programs: { node: { candidates: ["node"], required: true, enabled: false } },
   }), /required Program node cannot be disabled/);
-  assert.throws(() => parseProgramManifest({
+  for (const override of [{ required: false }, { enabled: false }]) assert.throws(() => parseProgramManifest({
     version: 1,
     programs: { node: { candidates: ["node"], required: true } },
-    platforms: { [process.platform]: { programs: { node: { enabled: false } } } },
-  }), /required Program node cannot be disabled/);
+    platforms: { [process.platform]: { programs: { node: override } } },
+  }), /required Program node cannot be (optional|disabled)/);
 });
 
 test("Program Manifest requires environment references by default and validates platform search paths", () => {
@@ -127,8 +127,12 @@ test("Command Runtime snapshots environment references", async () => {
 
 test("Command Runtime resolves manifest-relative candidates and requires their base", async () => {
   await assert.rejects(createCommandRuntime({ roots: [root], manifest: { version: 1, programs: { node: { candidates: ["./node"] } } } }), /MANIFEST_DIRECTORY_REQUIRED/);
-  const runtime = await createCommandRuntime({ roots: [root], manifestDirectory: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), manifest: { version: 1, programs: { node: { candidates: ["./" + execPath.slice(Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")) + 1)], required: true } } } });
-  try { assert.equal((await runtime.inspectEnvironment()).programs.node?.executable, resolve(execPath)); } finally { await runtime.close(); }
+  const runtime = await createCommandRuntime({ roots: [root], manifestDirectory: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), manifest: { version: 1, programs: { node: { candidates: ["./missing-node", "./" + execPath.slice(Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")) + 1)], required: true } } } });
+  try {
+    const program = (await runtime.inspectEnvironment()).programs.node;
+    assert.equal(program?.executable, resolve(execPath));
+    assert.equal(program?.declaredCandidate, "./" + execPath.slice(Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")) + 1));
+  } finally { await runtime.close(); }
 });
 
 test("Command Runtime rejects missing required environment references", async () => {

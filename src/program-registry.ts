@@ -82,10 +82,15 @@ export async function inspectEnvironment(options: RegistryOptions): Promise<Envi
   const platform = options.platform ?? process.platform;
   const programs: Record<string, RegisteredProgram> = {};
   for (const [logicalName, candidates] of Object.entries(options.aliases ?? DEFAULT_ALIASES)) {
-    const executable = await resolveExecutable(candidates, {
-      platform, path: options.path, pathExt: options.pathExt,
-    });
-    if (executable) programs[logicalName] = { logicalName, executable, kind: classifyProgram(executable) };
+    for (const declaredCandidate of candidates) {
+      const executable = await resolveExecutable([declaredCandidate], {
+        platform, path: options.path, pathExt: options.pathExt,
+      });
+      if (executable) {
+        programs[logicalName] = { logicalName, executable, declaredCandidate, kind: classifyProgram(executable) };
+        break;
+      }
+    }
   }
   return { platform, arch: process.arch, cwd: options.cwd, programs };
 }

@@ -24,6 +24,9 @@ test("stdio server lists dynamic programs and executes one", async () => {
     const execTool = listed.tools.find((tool) => tool.name === "system_exec");
     const programSchema = execTool?.inputSchema.properties?.program as { enum?: string[] } | undefined;
     assert.ok(programSchema?.enum?.includes("node"));
+    const environment = await client.callTool({ name: "system_environment", arguments: {} });
+    const registered = (environment.structuredContent as { programs: Record<string, { declaredCandidate: string }> }).programs.node;
+    assert.equal(registered?.declaredCandidate, "node");
 
     const result = await client.callTool({
       name: "system_exec",

@@ -4,7 +4,7 @@ import { execPath } from "node:process";
 import test from "node:test";
 import { executeProgram } from "../src/execute.js";
 
-const nodeProgram = { logicalName: "node", executable: execPath, kind: "native" as const };
+const nodeProgram = { logicalName: "node", executable: execPath, declaredCandidate: "node", kind: "native" as const };
 
 test("executeProgram passes arguments literally without a shell", async () => {
   const values = ["$HOME", "*.ts", "a && b", "中文 空格"];
@@ -85,6 +85,20 @@ test("executeProgram lets exit claim completion before aborting prior to close",
   assert.equal(outcome.exitCode, 0);
   assert.equal(outcome.cancelled, false);
   assert.equal(outcome.timedOut, false);
+});
+
+test("executeProgram retains stream data emitted after exit until close", async () => {
+  const child = fakeChild();
+  const result = executeProgram({
+    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024,
+  }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
+  child.emit("exit", 0, null);
+  child.stdout.emit("data", Buffer.from("after-exit"));
+  child.stderr.emit("data", Buffer.from("after-exit-error"));
+  child.emit("close", 0, null);
+  const outcome = await result;
+  assert.equal(outcome.stdout.text, "after-exit");
+  assert.equal(outcome.stderr.text, "after-exit-error");
 });
 
 test("executeProgram lets a natural exit claim the terminal state before a timeout", async () => {
