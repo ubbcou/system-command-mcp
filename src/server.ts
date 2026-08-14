@@ -23,6 +23,16 @@ export async function createServer(options: ServerOptions): Promise<McpServer> {
   const programNames = Object.keys(snapshot.programs).sort();
   const programSchema = programNames.length > 0 ? z.enum(programNames as [string, ...string[]]) : z.string().refine(() => false, "No programs are registered");
   const server = new McpServer({ name: "system-command-mcp", version: "0.1.0" });
+  let runtimeClose: Promise<void> | undefined;
+  const closeRuntime = (): Promise<void> => runtimeClose ??= runtime.close();
+  const connect = server.connect.bind(server);
+  server.connect = async transport => {
+    const onclose = transport.onclose;
+    transport.onclose = () => { onclose?.(); void closeRuntime(); };
+    await connect(transport);
+  };
+  const close = server.close.bind(server);
+  server.close = async () => { await closeRuntime(); await close(); };
   server.registerTool("system_environment", {
     description: "Return the authoritative Execution Environment and Registered Programs. Program availability is already reflected in system_exec; do not probe with shell discovery commands.",
   }, async () => {

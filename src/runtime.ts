@@ -53,6 +53,7 @@ function program(value: unknown, path: string, partial = false): ManifestProgram
 }
 function mergeLayer(base?: EnvironmentLayer, override?: EnvironmentLayer): EnvironmentLayer | undefined { return base || override ? { remove: override?.remove ?? base?.remove, set: { ...base?.set, ...override?.set } } : undefined; }
 function mergeProgram(base: ManifestProgram, override?: Partial<ManifestProgram>): ManifestProgram { return { ...base, ...override, candidates: override?.candidates ?? base.candidates, required: base.required || override?.required, policy: { ...base.policy, ...override?.policy }, environment: mergeLayer(base.environment, override?.environment) }; }
+function validatePolicy(value: ProgramPolicy | undefined, path: string): void { if (value?.defaultTimeoutMs !== undefined && value.maxTimeoutMs !== undefined && value.defaultTimeoutMs > value.maxTimeoutMs) throw new Error(`INVALID_MANIFEST: ${path}.defaultTimeoutMs exceeds ${path}.maxTimeoutMs`); }
 
 export function parseProgramManifest(value: unknown, platform: NodeJS.Platform = process.platform): ProgramManifest {
   const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "programs", "platforms"], "manifest");
@@ -65,7 +66,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
     if (!LOGICAL_PROGRAM_NAME.test(name)) throw new Error(`INVALID_MANIFEST: manifest.programs.${name}`);
     return [name, program(definition, `manifest.programs.${name}`) as ManifestProgram];
   }));
-  for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
+  for (const [name, definition] of Object.entries(programs)) { if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`); validatePolicy(definition.policy, `manifest.programs.${name}.policy`); }
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
   const platformOverrides: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(platforms)) {
@@ -82,6 +83,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
       const merged = mergeProgram(programs[programName], parsed);
       if (programs[programName].required && parsed.required === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be optional`);
       if (merged.required && merged.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be disabled`);
+      validatePolicy(merged.policy, `manifest.platforms.${name}.programs.${programName}.policy`);
     }
     platformOverrides[name] = item;
   }
@@ -151,7 +153,8 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
       const policy = policies[request.program] ?? {}; const timeoutMs = request.timeoutMs ?? policy.defaultTimeoutMs ?? options.defaultTimeoutMs ?? 30_000; if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_TIMEOUT, MAX_TIMEOUT)) throw new Error("INVALID_TIMEOUT");
       if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
-      const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd; if (roots.length > 1 && !isAbsolute(wanted)) throw new Error("CWD_NOT_ALLOWED");
+      if (roots.length > 1 && (request.cwd === undefined || !isAbsolute(request.cwd))) throw new Error("CWD_NOT_ALLOWED");
+      const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd;
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
       const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);

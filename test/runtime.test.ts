@@ -85,6 +85,11 @@ test("Program Manifest rejects required disabled programs in inactive platform o
   }), /required Program node cannot be disabled/);
 });
 
+test("Program Manifest rejects invalid effective policy in base and inactive platform definitions", () => {
+  assert.throws(() => parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"], policy: { defaultTimeoutMs: 200, maxTimeoutMs: 100 } } } }), /defaultTimeoutMs exceeds/);
+  assert.throws(() => parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"], policy: { maxTimeoutMs: 100 } } }, platforms: { inactive: { programs: { node: { policy: { defaultTimeoutMs: 200 } } } } } }), /defaultTimeoutMs exceeds/);
+});
+
 test("Program Manifest requires environment references by default and validates platform search paths", () => {
   const parsed = parseProgramManifest({
     version: 1,
@@ -193,6 +198,16 @@ test("a pre-aborted signal returns only the cancelled terminal state", async () 
     assert.equal(result.cancelled, true);
     assert.equal(result.timedOut, false);
   } finally { await runtime.close(); }
+});
+
+test("Command Runtime requires an absolute cwd with multiple roots", async () => {
+  const secondRoot = await mkdtemp(join(tmpdir(), "system-command-mcp-root-"));
+  const runtime = await createCommandRuntime({ roots: [root, secondRoot], manifest: manifest({ node: { candidates: ["node"], required: true } }) });
+  try {
+    await assert.rejects(runtime.execute({ program: "node", args: ["--version"], timeoutMs: 1_000 }), /CWD_NOT_ALLOWED/);
+    await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /CWD_NOT_ALLOWED/);
+    assert.equal((await runtime.execute({ program: "node", args: ["--version"], cwd: root, timeoutMs: 1_000 })).exitCode, 0);
+  } finally { await runtime.close(); await rm(secondRoot, { recursive: true }); }
 });
 
 test("Command Runtime authorizes roots, bounded arguments, and opt-in stdin", async () => {

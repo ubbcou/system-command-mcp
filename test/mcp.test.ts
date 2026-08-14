@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import { execPath } from "node:process";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 test("createServer requires explicit roots with a manifest", async () => {
   await assert.rejects(createServer({ manifest: { version: 1, programs: {} } }), /ROOT_REQUIRED/);
+});
+
+test("MCP Server transport close cancels active execution once", async () => {
+  const server = await createServer({ root: process.cwd() });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const handler = (server as unknown as { _registeredTools: Record<string, { handler: (args: { program: string; args: string[]; timeoutMs: number }, extra: { signal: AbortSignal }) => Promise<{ structuredContent: unknown }> }> })._registeredTools.system_exec!.handler;
+  await server.connect(serverTransport);
+  const running = handler({ program: "node", args: ["-e", "setTimeout(() => {}, 1000)"], timeoutMs: 2_000 }, { signal: new AbortController().signal });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await Promise.all([clientTransport.close(), server.close(), server.close()]);
+  assert.equal(((await running).structuredContent as { cancelled: boolean }).cancelled, true);
 });
 
 test("stdio server lists dynamic programs and executes one", async () => {
