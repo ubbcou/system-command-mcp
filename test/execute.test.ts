@@ -27,10 +27,38 @@ test("executeProgram keeps only the output tail", async () => {
   assert.equal(result.stdout.truncated, true);
 });
 
-test("executeProgram rejects stdin pipe errors", async () => {
-  await assert.rejects(executeProgram({
-    program: nodeProgram, args: ["-e", "process.stdin.destroy()"], cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1024, input: "x".repeat(1024 * 1024),
-  }));
+function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: EventEmitter & { end(input: string, encoding: string, callback: () => void): void }; killed: boolean; kill(): void } {
+  const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: EventEmitter & { end(input: string, encoding: string, callback: () => void): void }; killed: boolean; kill(): void };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = Object.assign(new EventEmitter(), { end: () => {} });
+  child.killed = false;
+  child.kill = () => { child.killed = true; };
+  return child;
+}
+
+for (const stream of ["stdout", "stderr"] as const) {
+  test(`executeProgram rejects and kills on ${stream} errors`, async () => {
+    const child = fakeChild();
+    const result = executeProgram({
+      program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024,
+    }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
+    const error = new Error(`${stream} failure`);
+    child[stream].emit("error", error);
+    await assert.rejects(result, error);
+    assert.equal(child.killed, true);
+  });
+}
+
+test("executeProgram rejects and kills on stdin errors", async () => {
+  const child = fakeChild();
+  const result = executeProgram({
+    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024, input: "input",
+  }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
+  const error = new Error("stdin failure");
+  child.stdin.emit("error", error);
+  await assert.rejects(result, error);
+  assert.equal(child.killed, true);
 });
 
 test("executeProgram reports timeouts", async () => {

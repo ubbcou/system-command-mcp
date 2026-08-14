@@ -40,17 +40,33 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
   const stderr = new TailBuffer(request.maxOutputBytes);
   let termination: "timeout" | "cancelled" | undefined;
   let terminalClaimed = false;
+  let settled = false;
 
   return new Promise<ExecuteResult>((resolve, reject) => {
     const child = spawnProcess(request.program.executable, [...request.args], {
       cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
-    child.stdout?.on("data", (chunk: Buffer) => stdout.append(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.append(chunk));
+    const onStdoutData = (chunk: Buffer): void => stdout.append(chunk);
+    const onStderrData = (chunk: Buffer): void => stderr.append(chunk);
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
     const stop = (): void => { if (!child.killed) child.kill(); };
     const onAbort = (): void => claimTermination("cancelled");
-    const cleanup = (): void => { clearTimeout(timer); request.signal?.removeEventListener("abort", onAbort); };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", onAbort);
+      child.stdout?.removeListener("data", onStdoutData);
+      child.stderr?.removeListener("data", onStderrData);
+    };
     const claimTermination = (reason: "timeout" | "cancelled"): void => { if (!terminalClaimed) { terminalClaimed = true; termination = reason; stop(); } };
+    const internalFailure = (error: Error): void => {
+      if (terminalClaimed) return;
+      terminalClaimed = true;
+      cleanup();
+      stop();
+      settled = true;
+      reject(error);
+    };
     const timer = setTimeout(() => claimTermination("timeout"), request.timeoutMs);
     timer.unref();
     request.signal?.addEventListener("abort", onAbort, { once: true });
@@ -61,21 +77,20 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
         cleanup();
       }
     });
-    const fail = (error: Error): void => {
-      if (terminalClaimed) return;
-      terminalClaimed = true;
-      cleanup();
-      reject(error);
-    };
-    child.once("error", fail);
+    child.on("error", internalFailure);
+    child.stdout?.on("error", internalFailure);
+    child.stderr?.on("error", internalFailure);
     if (request.input !== undefined && child.stdin) {
-      child.stdin.once("error", fail);
+      child.stdin.on("error", internalFailure);
       child.stdin.end(request.input, "utf8", () => {});
     }
     child.once("close", (exitCode, signal) => {
-      if (!terminalClaimed) terminalClaimed = true;
-      cleanup();
-      resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
+      if (!settled) {
+        terminalClaimed = true;
+        settled = true;
+        cleanup();
+        resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
+      }
     });
   });
 }
