@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { execPath } from "node:process";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { createServer } from "../src/server.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+test("createServer requires explicit roots with a manifest", async () => {
+  await assert.rejects(createServer({ manifest: { version: 1, programs: {} } }), /ROOT_REQUIRED/);
+});
 
 test("stdio server lists dynamic programs and executes one", async () => {
   const transport = new StdioClientTransport({

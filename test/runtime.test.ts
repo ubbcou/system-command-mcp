@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
 import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
@@ -48,15 +51,56 @@ test("Configured Mode uses one layered execution environment for registration an
   }
 });
 
-test("Configured Mode requires Core Programs while Optional Programs may be absent", async () => {
+test("Configured Mode requires required Programs while Optional Programs may be absent", async () => {
   await assert.rejects(createCommandRuntime({
     roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], required: true } }),
-  }), /CORE_PROGRAM_UNAVAILABLE/);
+  }), /REQUIRED_PROGRAM_UNAVAILABLE/);
   const runtime = await createCommandRuntime({
     roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], required: false } }),
   });
   try {
     assert.equal((await runtime.inspectEnvironment()).programs.missing, undefined);
+  } finally { await runtime.close(); }
+});
+
+test("Program Manifest validates required disabled definitions before and after platform merging", () => {
+  assert.throws(() => parseProgramManifest({
+    version: 1, programs: { node: { candidates: ["node"], required: true, enabled: false } },
+  }), /required Program node cannot be disabled/);
+  assert.throws(() => parseProgramManifest({
+    version: 1,
+    programs: { node: { candidates: ["node"], required: true } },
+    platforms: { [process.platform]: { programs: { node: { enabled: false } } } },
+  }), /required Program node cannot be disabled/);
+});
+
+test("Program Manifest requires environment references by default and validates platform search paths", () => {
+  const parsed = parseProgramManifest({
+    version: 1,
+    searchPath: ["base"],
+    programs: { node: { candidates: ["node"] } },
+    platforms: { [process.platform]: { searchPath: ["platform"] } },
+  });
+  assert.deepEqual(parsed.searchPath, ["platform", "base"]);
+  assert.throws(() => parseProgramManifest({
+    version: 1, programs: { node: { candidates: ["node"] } }, platforms: { [process.platform]: { searchPath: [1] } },
+  }), /INVALID_MANIFEST: searchPath/);
+});
+
+test("Command Runtime rejects missing required environment references", async () => {
+  await assert.rejects(createCommandRuntime({
+    roots: [root],
+    environment: { PATH: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))) },
+    manifest: manifest({ node: { candidates: ["node"], environment: { set: { SECRET: { fromEnvironment: "MISSING" } } } } }),
+  }), /MISSING_ENVIRONMENT_REFERENCE: MISSING/);
+});
+
+test("Command Runtime revalidates roots before execution", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "system-command-mcp-"));
+  const runtime = await createCommandRuntime({ roots: [temporaryRoot], manifest: manifest({ node: { candidates: ["node"], required: true } }) });
+  try {
+    await rm(temporaryRoot, { recursive: true });
+    await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /ROOT_UNAVAILABLE/);
   } finally { await runtime.close(); }
 });
 

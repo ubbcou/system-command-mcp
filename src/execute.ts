@@ -38,9 +38,9 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
   const stdout = new TailBuffer(request.maxOutputBytes);
   const stderr = new TailBuffer(request.maxOutputBytes);
   let termination: "timeout" | "cancelled" | undefined;
+  let terminalClaimed = false;
 
   return new Promise<ExecuteResult>((resolve, reject) => {
-    if (request.signal?.aborted) termination = "cancelled";
     const child = spawn(request.program.executable, [...request.args], {
       cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
@@ -48,19 +48,23 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
     child.stderr?.on("data", (chunk: Buffer) => stderr.append(chunk));
     if (request.input !== undefined) child.stdin?.end(request.input, "utf8");
     const stop = (): void => { if (!child.killed) child.kill(); };
-    const timer = setTimeout(() => { if (!termination) { termination = "timeout"; stop(); } }, request.timeoutMs);
+    const onAbort = (): void => claimTermination("cancelled");
+    const cleanup = (): void => { clearTimeout(timer); request.signal?.removeEventListener("abort", onAbort); };
+    const claimTermination = (reason: "timeout" | "cancelled"): void => { if (!terminalClaimed) { terminalClaimed = true; termination = reason; stop(); } };
+    const timer = setTimeout(() => claimTermination("timeout"), request.timeoutMs);
     timer.unref();
-    const onAbort = (): void => { if (!termination) { termination = "cancelled"; stop(); } };
     request.signal?.addEventListener("abort", onAbort, { once: true });
-    if (termination === "cancelled") stop();
+    if (request.signal?.aborted) onAbort();
+    child.once("exit", () => { if (!terminalClaimed) { terminalClaimed = true; cleanup(); } });
     child.once("error", (error) => {
-      clearTimeout(timer);
-      request.signal?.removeEventListener("abort", onAbort);
+      if (terminalClaimed) return;
+      terminalClaimed = true;
+      cleanup();
       reject(error);
     });
     child.once("close", (exitCode, signal) => {
-      clearTimeout(timer);
-      request.signal?.removeEventListener("abort", onAbort);
+      if (!terminalClaimed) terminalClaimed = true;
+      cleanup();
       resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
     });
   });

@@ -16,6 +16,7 @@ function environmentValue(snapshot: RuntimeEnvironment): Record<string, unknown>
 }
 
 export async function createServer(options: ServerOptions): Promise<McpServer> {
+  if (options.manifest !== undefined && !options.roots?.length && !options.root) throw new Error("ROOT_REQUIRED");
   const roots = options.roots ?? (options.root ? [options.root] : [process.cwd()]);
   const runtime = await createCommandRuntime({ ...options, roots });
   const snapshot = await runtime.inspectEnvironment();

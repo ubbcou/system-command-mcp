@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
@@ -59,10 +59,13 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   if (root.searchPath !== undefined && (!Array.isArray(root.searchPath) || !root.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");
   if (root.allowInheritedPath !== undefined && typeof root.allowInheritedPath !== "boolean") throw new Error("INVALID_MANIFEST: allowInheritedPath");
   const programs = Object.fromEntries(Object.entries(object(root.programs, "manifest.programs")).map(([name, definition]) => [name, program(definition, `manifest.programs.${name}`) as ManifestProgram]));
+  for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
   const overrideRaw = platforms[platform];
   let override: Record<string, unknown> = {};
   if (overrideRaw !== undefined) { override = object(overrideRaw, `manifest.platforms.${platform}`); unknownFields(override, ["searchPath", "allowInheritedPath", "environment", "programs"], `manifest.platforms.${platform}`); }
+  if (override.searchPath !== undefined && (!Array.isArray(override.searchPath) || !override.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");
+  if (override.allowInheritedPath !== undefined && typeof override.allowInheritedPath !== "boolean") throw new Error("INVALID_MANIFEST: allowInheritedPath");
   const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
   for (const [name, item] of Object.entries(overrides)) {
     const parsed = program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>;
@@ -70,19 +73,20 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
     programs[name] = mergeProgram(programs[name], parsed);
     if (programs[name].required && programs[name].enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
   }
-  return { version: 1, programs, searchPath: (override.searchPath as string[] | undefined) ?? root.searchPath as string[] | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
+  return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
 }
 
 function isInside(root: string, candidate: string): boolean { const child = relative(root, candidate); return child === "" || (!child.startsWith("..") && !isAbsolute(child)); }
 function set(environment: Record<string, string>, key: string, value: string, platform: NodeJS.Platform): void { const actual = platform === "win32" ? Object.keys(environment).find(existing => existing.toLowerCase() === key.toLowerCase()) ?? key : key; environment[actual] = value; }
 function remove(environment: Record<string, string>, key: string, platform: NodeJS.Platform): void { for (const existing of Object.keys(environment)) if (platform !== "win32" ? existing === key : existing.toLowerCase() === key.toLowerCase()) delete environment[existing]; }
-function applyLayer(environment: Record<string, string>, input: NodeJS.ProcessEnv, layer: EnvironmentLayer | undefined, platform: NodeJS.Platform): void { for (const key of layer?.remove ?? []) remove(environment, key, platform); for (const [key, value] of Object.entries(layer?.set ?? {})) { if (typeof value === "string") set(environment, key, value, platform); else { const found = platform === "win32" ? Object.entries(input).find(([name]) => name.toLowerCase() === value.fromEnvironment.toLowerCase())?.[1] : input[value.fromEnvironment]; if (found === undefined) { if (value.required) throw new Error(`MISSING_ENVIRONMENT_REFERENCE: ${value.fromEnvironment}`); remove(environment, key, platform); } else set(environment, key, found, platform); } } }
+function applyLayer(environment: Record<string, string>, input: NodeJS.ProcessEnv, layer: EnvironmentLayer | undefined, platform: NodeJS.Platform): void { for (const key of layer?.remove ?? []) remove(environment, key, platform); for (const [key, value] of Object.entries(layer?.set ?? {})) { if (typeof value === "string") set(environment, key, value, platform); else { const found = platform === "win32" ? Object.entries(input).find(([name]) => name.toLowerCase() === value.fromEnvironment.toLowerCase())?.[1] : input[value.fromEnvironment]; if (found === undefined) { if (value.required !== false) throw new Error(`MISSING_ENVIRONMENT_REFERENCE: ${value.fromEnvironment}`); remove(environment, key, platform); } else set(environment, key, found, platform); } } }
 
 export async function createCommandRuntime(options: CommandRuntimeOptions): Promise<CommandRuntime> {
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
   const platform = options.platform ?? process.platform;
   const physicalRoots = [...new Set(await Promise.all(options.roots.map(root => realpath(root))))];
   const roots = physicalRoots.filter(root => !physicalRoots.some(other => other !== root && isInside(other, root)));
+  const rootIdentities = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; }));
   const input = options.environment ?? process.env;
   const configured = options.manifest !== undefined;
   const manifest = configured ? parseProgramManifest(options.manifest, platform) : undefined;
@@ -100,7 +104,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     if (definition.enabled === false) continue;
     const perProgramEnvironment = { ...environment }; applyLayer(perProgramEnvironment, input, definition.environment, platform);
     const executable = await resolveExecutable(definition.candidates, { platform, path: perProgramEnvironment[platform === "win32" ? Object.keys(perProgramEnvironment).find(k => k.toLowerCase() === "path") ?? "PATH" : "PATH"], pathExt: perProgramEnvironment.PATHEXT });
-    if (!executable) { if (definition.required) throw new Error(`CORE_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
+    if (!executable) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
     programs[logicalName] = { logicalName, executable, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
   }
   let closed = false;
@@ -108,6 +112,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   return { async inspectEnvironment() { return snapshot(); }, async execute(request) {
     if (closed) throw new Error("RUNTIME_CLOSING"); const definition = programs[request.program]; if (!definition) throw new Error(`PROGRAM_NOT_REGISTERED: ${request.program}`);
     const args = request.args ?? []; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
+    try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
     const policy = policies[request.program] ?? {}; const timeoutMs = request.timeoutMs ?? policy.defaultTimeoutMs ?? options.defaultTimeoutMs ?? 30_000; if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_TIMEOUT, MAX_TIMEOUT)) throw new Error("INVALID_TIMEOUT");
     if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
     const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd; if (roots.length > 1 && !isAbsolute(wanted)) throw new Error("CWD_NOT_ALLOWED");

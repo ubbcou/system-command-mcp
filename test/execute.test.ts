@@ -34,3 +34,24 @@ test("executeProgram reports timeouts", async () => {
   assert.equal(result.timedOut, true);
   assert.notEqual(result.exitCode, 0);
 });
+
+test("executeProgram does not let a late abort relabel a natural exit", async () => {
+  const controller = new AbortController();
+  const result = await executeProgram({
+    program: nodeProgram, args: ["-e", "process.exit(0)"],
+    cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024, signal: controller.signal,
+  });
+  controller.abort();
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.cancelled, false);
+  assert.equal(result.timedOut, false);
+});
+
+test("executeProgram lets a natural exit claim the terminal state before a timeout", async () => {
+  const result = await executeProgram({
+    program: nodeProgram, args: ["-e", "process.exit(0)"],
+    cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+});
