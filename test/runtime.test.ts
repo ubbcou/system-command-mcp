@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execPath } from "node:process";
@@ -74,6 +74,14 @@ test("Program Manifest preserves base required Programs through platform merging
   }), /required Program node cannot be (optional|disabled)/);
 });
 
+test("Program Manifest rejects required disabled programs in inactive platform overrides", () => {
+  assert.throws(() => parseProgramManifest({
+    version: 1,
+    programs: { node: { candidates: ["node"], required: false } },
+    platforms: { inactive: { programs: { node: { required: true, enabled: false } } } },
+  }), /required Program node cannot be disabled/);
+});
+
 test("Program Manifest requires environment references by default and validates platform search paths", () => {
   const parsed = parseProgramManifest({
     version: 1,
@@ -130,8 +138,20 @@ test("Command Runtime resolves manifest-relative candidates and requires their b
   const runtime = await createCommandRuntime({ roots: [root], manifestDirectory: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), manifest: { version: 1, programs: { node: { candidates: ["./missing-node", "./" + execPath.slice(Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")) + 1)], required: true } } } });
   try {
     const program = (await runtime.inspectEnvironment()).programs.node;
-    assert.equal(program?.executable, resolve(execPath));
+    assert.equal(program?.executable, await realpath(execPath));
     assert.equal(program?.declaredCandidate, "./" + execPath.slice(Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")) + 1));
+  } finally { await runtime.close(); }
+});
+
+test("Command Runtime resolves configured executable symlinks", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-mcp-runtime-link-"));
+  const link = join(directory, "node-link" + (process.platform === "win32" ? ".exe" : ""));
+  try { await symlink(execPath, link, process.platform === "win32" ? "file" : undefined); } catch (error) { if (process.platform === "win32") return t.skip(`symlink unavailable: ${error}`); throw error; }
+  const runtime = await createCommandRuntime({ roots: [root], manifestDirectory: directory, manifest: { version: 1, programs: { node: { candidates: ["./" + link.slice(directory.length + 1)], required: true } } } });
+  try {
+    const program = (await runtime.inspectEnvironment()).programs.node;
+    assert.equal(program?.executable, await realpath(execPath));
+    assert.equal(program?.declaredCandidate, "./" + link.slice(directory.length + 1));
   } finally { await runtime.close(); }
 });
 

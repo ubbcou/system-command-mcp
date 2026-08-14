@@ -50,7 +50,8 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
     const onStderrData = (chunk: Buffer): void => stderr.append(chunk);
     child.stdout?.on("data", onStdoutData);
     child.stderr?.on("data", onStderrData);
-    const stop = (): void => { if (!child.killed) child.kill(); };
+    let exited = false;
+    const stop = (): void => { if (!exited && !child.killed) child.kill(); };
     const onAbort = (): void => claimTermination("cancelled");
     const cleanup = (): void => {
       clearTimeout(timer);
@@ -63,7 +64,7 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
     };
     const claimTermination = (reason: "timeout" | "cancelled"): void => { if (!terminalClaimed) { terminalClaimed = true; termination = reason; stop(); } };
     const internalFailure = (error: Error): void => {
-      if (terminalClaimed) return;
+      if (settled) return;
       terminalClaimed = true;
       settleCleanup();
       stop();
@@ -75,6 +76,7 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
     request.signal?.addEventListener("abort", onAbort, { once: true });
     if (request.signal?.aborted) onAbort();
     child.once("exit", () => {
+      exited = true;
       if (!terminalClaimed) {
         terminalClaimed = true;
         cleanup();

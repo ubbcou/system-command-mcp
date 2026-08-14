@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -53,4 +53,15 @@ test("inspectEnvironment exposes only installed logical programs", async () => {
   assert.equal(snapshot.programs.tool?.executable, path);
   assert.equal(snapshot.programs.tool?.declaredCandidate, "real-tool");
   assert.equal(snapshot.programs.missing, undefined);
+});
+
+test("inspectEnvironment resolves executable symlinks", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "system-command-mcp-registry-link-"));
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const target = await executable(dir, "target" + suffix);
+  const link = join(dir, "tool" + suffix);
+  try { await symlink(target, link, process.platform === "win32" ? "file" : undefined); } catch (error) { if (process.platform === "win32") return t.skip(`symlink unavailable: ${error}`); throw error; }
+  const snapshot = await inspectEnvironment({ cwd: dir, path: dir, aliases: { tool: ["tool"] } });
+  assert.equal(snapshot.programs.tool?.executable, await realpath(target));
+  assert.equal(snapshot.programs.tool?.declaredCandidate, "tool");
 });

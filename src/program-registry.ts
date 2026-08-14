@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, readdir } from "node:fs/promises";
+import { access, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { EnvironmentSnapshot, RegisteredProgram } from "./types.js";
@@ -38,6 +38,11 @@ async function isExecutable(path: string, platform: NodeJS.Platform): Promise<bo
   }
 }
 
+async function resolvedExecutable(path: string, platform: NodeJS.Platform): Promise<string | undefined> {
+  if (!await isExecutable(path, platform)) return undefined;
+  try { return await realpath(path); } catch { return undefined; }
+}
+
 async function windowsPath(path: string): Promise<string | undefined> {
   try {
     const name = (await readdir(dirname(path))).find(name => name.toLowerCase() === basename(path).toLowerCase());
@@ -60,18 +65,24 @@ export async function resolveExecutable(
     const manifestRelative = candidate.startsWith("./") || candidate.startsWith("../");
     if (manifestRelative && !options.manifestDirectory) throw new Error("MANIFEST_DIRECTORY_REQUIRED");
     const file = candidate.startsWith("~/") ? resolve(homedir(), candidate.slice(2)) : manifestRelative ? resolve(options.manifestDirectory!, candidate) : candidate;
-    if ((isAbsolute(file) || manifestRelative) && await isExecutable(file, platform)) return file;
-    if (isAbsolute(file) || manifestRelative) continue;
+    if (isAbsolute(file) || manifestRelative) {
+      const resolved = await resolvedExecutable(file, platform);
+      if (resolved) return resolved;
+      continue;
+    }
     for (const directory of directories) {
       if (platform === "win32" && extname(file)) {
-        const path = join(directory, file);
-        if (await isExecutable(path, platform)) return path;
+        const resolved = await resolvedExecutable(join(directory, file), platform);
+        if (resolved) return resolved;
         continue;
       }
       for (const extension of extensions) {
         const path = join(directory, platform === "win32" ? file + extension : file);
         const actual = platform === "win32" ? await windowsPath(path) : path;
-        if (actual && await isExecutable(actual, platform)) return actual;
+        if (actual) {
+          const resolved = await resolvedExecutable(actual, platform);
+          if (resolved) return resolved;
+        }
       }
     }
   }

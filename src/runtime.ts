@@ -78,8 +78,9 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
       if (!LOGICAL_PROGRAM_NAME.test(programName)) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.programs.${programName}`);
       const parsed = program(definition, `manifest.platforms.${name}.programs.${programName}`, true) as Partial<ManifestProgram>;
       if (!programs[programName]) throw new Error(`INVALID_MANIFEST: platform program ${programName} has no base definition`);
+      const merged = mergeProgram(programs[programName], parsed);
       if (programs[programName].required && parsed.required === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be optional`);
-      if (programs[programName].required && parsed.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be disabled`);
+      if (merged.required && merged.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be disabled`);
     }
     platformOverrides[name] = item;
   }

@@ -101,6 +101,19 @@ test("executeProgram retains stream data emitted after exit until close", async 
   assert.equal(outcome.stderr.text, "after-exit-error");
 });
 
+test("executeProgram rejects stream errors after exit without killing", async () => {
+  const child = fakeChild();
+  const result = executeProgram({
+    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024,
+  }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
+  child.emit("exit", 0, null);
+  const error = new Error("stdout failure after exit");
+  child.stdout.emit("error", error);
+  child.emit("close", 0, null);
+  await assert.rejects(result, error);
+  assert.equal(child.killed, false);
+});
+
 test("executeProgram lets a natural exit claim the terminal state before a timeout", async () => {
   const result = await executeProgram({
     program: nodeProgram, args: ["-e", "process.exit(0)"],
