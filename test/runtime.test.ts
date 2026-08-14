@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
-import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
+import { cmdScriptArgumentIsSafe, createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
 
 const root = process.cwd();
 
@@ -215,6 +215,11 @@ test("Command Runtime requires an absolute cwd with multiple roots", async () =>
     await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /CWD_NOT_ALLOWED/);
     assert.equal((await runtime.execute({ program: "node", args: ["--version"], cwd: root, timeoutMs: 1_000 })).exitCode, 0);
   } finally { await runtime.close(); await rm(secondRoot, { recursive: true }); }
+});
+
+test("cmd-script capability rejects cmd.exe expansion and metacharacter arguments", () => {
+  for (const unsafe of ["%PATH%", "!VAR!", "a&b", "a|b", "a<b", "a>b", "a^b"]) assert.equal(cmdScriptArgumentIsSafe(unsafe), false);
+  for (const safe of ["space and quote", "C:\\dir with space\\tail\\", "你好🙂"]) assert.equal(cmdScriptArgumentIsSafe(safe), true);
 });
 
 test("Command Runtime authorizes roots, bounded arguments, and opt-in stdin", async () => {
