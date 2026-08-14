@@ -13,9 +13,10 @@ export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: 
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult>; close(): Promise<void>; }
-export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; maxOutputBytes?: number; }
+export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; maxOutputBytes?: number; maxConcurrentExecutions?: number; }
 
 const MAX_TIMEOUT = 600_000;
+const MAX_CONCURRENT_EXECUTIONS = 1_024;
 const MAX_ARGS = 4_096;
 const MAX_ARG_BYTES = 64 * 1024;
 const MAX_ARG_TOTAL_BYTES = 256 * 1024;
@@ -33,14 +34,14 @@ function layer(value: unknown, path: string): EnvironmentLayer | undefined {
     const reference = object(assignment, `${path}.set.${key}`); unknownFields(reference, ["fromEnvironment", "required"], `${path}.set.${key}`);
     if (typeof reference.fromEnvironment !== "string" || (reference.required !== undefined && typeof reference.required !== "boolean")) throw new Error(`INVALID_MANIFEST: ${path}.set.${key}`);
   }
-  return result as EnvironmentLayer;
+  return { remove: result.remove === undefined ? undefined : [...result.remove as string[]], set: result.set === undefined ? undefined : Object.fromEntries(Object.entries(result.set as Record<string, EnvironmentValue>).map(([key, assignment]) => [key, typeof assignment === "string" ? assignment : { ...assignment }])) };
 }
 function policy(value: unknown, path: string): ProgramPolicy | undefined {
   if (value === undefined) return undefined;
   const result = object(value, path); unknownFields(result, ["defaultTimeoutMs", "maxTimeoutMs", "allowStdin"], path);
   for (const name of ["defaultTimeoutMs", "maxTimeoutMs"] as const) if (result[name] !== undefined && (!Number.isInteger(result[name]) || (result[name] as number) <= 0 || (result[name] as number) > MAX_TIMEOUT)) throw new Error(`INVALID_MANIFEST: ${path}.${name}`);
   if (result.allowStdin !== undefined && typeof result.allowStdin !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.allowStdin`);
-  return result as ProgramPolicy;
+  return { ...result } as ProgramPolicy;
 }
 function program(value: unknown, path: string, partial = false): ManifestProgram | Partial<ManifestProgram> {
   const result = object(value, path); unknownFields(result, ["candidates", "required", "enabled", "policy", "environment"], path);
@@ -48,7 +49,7 @@ function program(value: unknown, path: string, partial = false): ManifestProgram
   if (partial && result.candidates !== undefined && (!Array.isArray(result.candidates) || result.candidates.length === 0 || !result.candidates.every(x => typeof x === "string" && x.length > 0))) throw new Error(`INVALID_MANIFEST: ${path}.candidates`);
   if (result.required !== undefined && typeof result.required !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.required`);
   if (result.enabled !== undefined && typeof result.enabled !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.enabled`);
-  return { ...result, policy: policy(result.policy, `${path}.policy`), environment: layer(result.environment, `${path}.environment`) } as ManifestProgram;
+  return { ...result, candidates: result.candidates === undefined ? undefined : [...result.candidates as string[]], policy: policy(result.policy, `${path}.policy`), environment: layer(result.environment, `${path}.environment`) } as ManifestProgram;
 }
 function mergeLayer(base?: EnvironmentLayer, override?: EnvironmentLayer): EnvironmentLayer | undefined { return base || override ? { remove: override?.remove ?? base?.remove, set: { ...base?.set, ...override?.set } } : undefined; }
 function mergeProgram(base: ManifestProgram, override?: Partial<ManifestProgram>): ManifestProgram { return { ...base, ...override, candidates: override?.candidates ?? base.candidates, required: base.required || override?.required, policy: { ...base.policy, ...override?.policy }, environment: mergeLayer(base.environment, override?.environment) }; }
@@ -99,8 +100,10 @@ function applyLayer(environment: Record<string, string>, input: NodeJS.ProcessEn
 
 export async function createCommandRuntime(options: CommandRuntimeOptions): Promise<CommandRuntime> {
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
+  const maxConcurrentExecutions = options.maxConcurrentExecutions ?? 8;
+  if (!Number.isInteger(maxConcurrentExecutions) || maxConcurrentExecutions <= 0 || maxConcurrentExecutions > MAX_CONCURRENT_EXECUTIONS) throw new Error("INVALID_CONCURRENCY_LIMIT");
   const platform = options.platform ?? process.platform;
-  const physicalRoots = [...new Set(await Promise.all(options.roots.map(root => realpath(root))))];
+  const physicalRoots = [...new Set(await Promise.all(options.roots.map(async root => { const physical = await realpath(root); if (!(await stat(physical)).isDirectory()) throw new Error("ROOT_NOT_DIRECTORY"); return physical; })))];
   const roots = physicalRoots.filter(root => !physicalRoots.some(other => other !== root && isInside(other, root)));
   const rootIdentities = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; }));
   const input = Object.freeze(Object.fromEntries(Object.entries(options.environment ?? process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)));
@@ -130,18 +133,31 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     if (!executable || !declaredCandidate) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
     programs[logicalName] = { logicalName, executable, declaredCandidate, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
   }
-  let closed = false;
-  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs, mode: configured ? "configured" : "automatic-discovery", roots, environmentNames: Object.keys(environment).sort() });
-  return { async inspectEnvironment() { return snapshot(); }, async execute(request) {
-    if (closed) throw new Error("RUNTIME_CLOSING"); const definition = programs[request.program]; if (!definition) throw new Error(`PROGRAM_NOT_REGISTERED: ${request.program}`);
-    const args = request.args ?? []; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
-    try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
-    const policy = policies[request.program] ?? {}; const timeoutMs = request.timeoutMs ?? policy.defaultTimeoutMs ?? options.defaultTimeoutMs ?? 30_000; if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_TIMEOUT, MAX_TIMEOUT)) throw new Error("INVALID_TIMEOUT");
-    if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
-    const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd; if (roots.length > 1 && !isAbsolute(wanted)) throw new Error("CWD_NOT_ALLOWED");
-    let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
-    if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
-    const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);
-    return executeProgram({ program: definition, args, cwd, timeoutMs, signal: request.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, input: request.input, environment: childEnvironment });
-  }, async close() { closed = true; } };
+  if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
+  let closing = false;
+  let closePromise: Promise<void> | undefined;
+  const active = new Map<Promise<ExecuteResult>, AbortController>();
+  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
+  return { async inspectEnvironment() { return snapshot(); }, execute(request) {
+    if (closing) return Promise.reject(new Error("RUNTIME_CLOSING"));
+    if (active.size >= maxConcurrentExecutions) return Promise.reject(new Error("CONCURRENCY_LIMIT"));
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    request.signal?.addEventListener("abort", abort, { once: true });
+    if (request.signal?.aborted) abort();
+    const execution = (async (): Promise<ExecuteResult> => {
+      const definition = programs[request.program]; if (!definition) throw new Error(`PROGRAM_NOT_REGISTERED: ${request.program}`);
+      const args = request.args ?? []; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
+      try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
+      const policy = policies[request.program] ?? {}; const timeoutMs = request.timeoutMs ?? policy.defaultTimeoutMs ?? options.defaultTimeoutMs ?? 30_000; if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_TIMEOUT, MAX_TIMEOUT)) throw new Error("INVALID_TIMEOUT");
+      if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
+      const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd; if (roots.length > 1 && !isAbsolute(wanted)) throw new Error("CWD_NOT_ALLOWED");
+      let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
+      if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
+      const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);
+      return executeProgram({ program: definition, args, cwd, timeoutMs, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, input: request.input, environment: childEnvironment });
+    })();
+    active.set(execution, controller);
+    return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });
+  }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); closePromise = Promise.allSettled([...active.keys()]).then(() => {}); } return closePromise; } };
 }

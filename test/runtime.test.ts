@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execPath } from "node:process";
@@ -51,16 +51,19 @@ test("Configured Mode uses one layered execution environment for registration an
   }
 });
 
-test("Configured Mode requires required Programs while Optional Programs may be absent", async () => {
+test("Configured Mode requires at least one Registered Program", async () => {
   await assert.rejects(createCommandRuntime({
     roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], required: true } }),
   }), /REQUIRED_PROGRAM_UNAVAILABLE/);
-  const runtime = await createCommandRuntime({
+  await assert.rejects(createCommandRuntime({
     roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], required: false } }),
-  });
-  try {
-    assert.equal((await runtime.inspectEnvironment()).programs.missing, undefined);
-  } finally { await runtime.close(); }
+  }), /NO_PROGRAMS_REGISTERED/);
+});
+
+test("Command Runtime rejects roots that are not directories", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "system-command-mcp-root-")), "file");
+  await writeFile(file, "x");
+  await assert.rejects(createCommandRuntime({ roots: [file] }), /ROOT_NOT_DIRECTORY/);
 });
 
 test("Program Manifest preserves base required Programs through platform merging", () => {
@@ -114,11 +117,10 @@ test("Program Manifest validates logical names, candidates, and pathExt", () => 
 });
 
 test("Configured Mode uses only configured pathExt", async () => {
-  const runtime = await createCommandRuntime({
+  await assert.rejects(createCommandRuntime({
     roots: [root], platform: "win32", environment: { Path: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), pathext: ".EXE" },
     manifest: { version: 1, pathExt: ".CMD", searchPath: [execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")))], programs: { node: { candidates: ["node"], required: false } } },
-  });
-  try { assert.equal((await runtime.inspectEnvironment()).programs.node, undefined); } finally { await runtime.close(); }
+  }), /NO_PROGRAMS_REGISTERED/);
 });
 
 test("Command Runtime snapshots environment references", async () => {
@@ -204,5 +206,34 @@ test("Command Runtime authorizes roots, bounded arguments, and opt-in stdin", as
     });
     assert.equal(result.stdout.text, "input");
     await assert.rejects(runtime.execute({ program: "node", args: ["bad\0arg"], cwd: root, timeoutMs: 1_000 }), /INVALID_ARGUMENT/);
+  } finally { await runtime.close(); }
+});
+
+test("Command Runtime bounds concurrency and close cancels active executions", async () => {
+  const runtime = await createCommandRuntime({ roots: [root], maxConcurrentExecutions: 1, manifest: manifest({ node: { candidates: ["node"], required: true } }) });
+  const running = runtime.execute({ program: "node", args: ["-e", "setTimeout(() => {}, 1000)"], cwd: ".", timeoutMs: 2_000 });
+  await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /CONCURRENCY_LIMIT/);
+  await runtime.close();
+  assert.equal((await running).cancelled, true);
+  await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /RUNTIME_CLOSING/);
+  await runtime.close();
+});
+
+test("Command Runtime snapshots inspection and manifest ownership", async () => {
+  const configured = manifest({ node: { candidates: ["node"], required: true, environment: { set: { MARKER: "first" } } } }) as { version: number; programs: { node: { candidates: string[]; required: boolean; environment: { set: { MARKER: string } } } }; platforms: Record<string, { searchPath: string[] }> };
+  const runtime = await createCommandRuntime({ roots: [root], manifest: configured });
+  try {
+    configured.platforms[process.platform]!.searchPath[0] = "missing";
+    configured.programs.node.environment.set.MARKER = "second";
+    const environment = await runtime.inspectEnvironment();
+    environment.roots.length = 0;
+    environment.environmentNames.length = 0;
+    environment.programs.node!.executable = "missing";
+    const result = await runtime.execute({ program: "node", args: ["-e", "process.stdout.write(process.env.MARKER)"], cwd: ".", timeoutMs: 1_000 });
+    assert.equal(result.stdout.text, "first");
+    const repeat = await runtime.inspectEnvironment();
+    assert.equal(repeat.roots[0], await realpath(root));
+    assert.ok(repeat.environmentNames.length > 0);
+    assert.notEqual(repeat.programs.node?.executable, "missing");
   } finally { await runtime.close(); }
 });
