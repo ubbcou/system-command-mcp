@@ -3,3 +3,4 @@ dist/
 .npm-cache/
 *.log
 .DS_Store
+.scratch/
