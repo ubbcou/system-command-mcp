@@ -169,5 +169,5 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     })();
     active.set(execution, controller);
     return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });
-  }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); const deadline = options.closeDeadlineMs ?? 15_000; closePromise = Promise.race([Promise.allSettled([...active.keys()]).then(() => {}), new Promise<void>(resolve => setTimeout(resolve, deadline))]); } return closePromise; } };
+  }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); const deadline = options.closeDeadlineMs ?? 15_000; let timer: NodeJS.Timeout | undefined; const settled = Promise.allSettled([...active.keys()]).then(() => {}); const expires = new Promise<void>(resolve => { timer = setTimeout(resolve, deadline); timer.unref(); }); closePromise = Promise.race([settled, expires]).finally(() => { if (timer) clearTimeout(timer); }); } return closePromise; } };
 }

@@ -246,6 +246,13 @@ test("Command Runtime bounds concurrency and close cancels active executions", a
   await runtime.close();
 });
 
+test("Command Runtime close deadline does not keep a standalone event loop alive", async () => {
+  const runtime = await createCommandRuntime({ roots: [root], closeDeadlineMs: 10_000 });
+  const started = Date.now();
+  await runtime.close();
+  assert.ok(Date.now() - started < 100);
+});
+
 test("Command Runtime snapshots inspection and manifest ownership", async () => {
   const configured = manifest({ node: { candidates: ["node"], required: true, environment: { set: { MARKER: "first" } } } }) as { version: number; programs: { node: { candidates: string[]; required: boolean; environment: { set: { MARKER: string } } } }; platforms: Record<string, { searchPath: string[] }> };
   const runtime = await createCommandRuntime({ roots: [root], manifest: configured });

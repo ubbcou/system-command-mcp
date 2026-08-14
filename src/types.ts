@@ -45,7 +45,7 @@ export interface NaturalTerminationOutcome {
 }
 
 export interface ForcedTerminationOutcome {
-  reason: "timeout" | "cancelled";
+  reason: "timeout" | "cancelled" | null;
   gracefulRequested: boolean;
   forceUsed: boolean;
   treeCleaned: boolean;

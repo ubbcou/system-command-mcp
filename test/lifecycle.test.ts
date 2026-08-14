@@ -64,3 +64,20 @@ test("Windows lifecycle bounds failed Job termination fallback", async () => {
   assert.match(String(outcome.diagnostics.fallback), /timed out/);
   adapter.close();
 });
+
+test("Windows natural close force-cleans remaining Job members", async () => {
+  const calls: string[] = [];
+  const adapter = createLifecycleAdapter(child() as never, 500, 20, {
+    platform: "win32",
+    windowsApis: {
+      CreateJobObjectW: () => "job", SetInformationJobObject: () => true, OpenProcess: () => "process", AssignProcessToJobObject: () => true,
+      TerminateJobObject: () => { calls.push("terminate"); return true; }, GetLastError: () => 0, CloseHandle: handle => { calls.push(`close:${handle}`); return true; },
+      QueryInformationJobObject: (_job, _class, info) => { info.writeUInt32LE(1, 40); return true; },
+    },
+  });
+  const outcome = await adapter.naturalClose();
+  assert.equal(outcome?.forceUsed, true);
+  assert.equal(outcome?.treeCleaned, false);
+  adapter.close();
+  assert.deepEqual(calls, ["terminate", "close:process", "close:job"]);
+});

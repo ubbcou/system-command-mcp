@@ -42,7 +42,7 @@ export async function createServer(options: ServerOptions): Promise<McpServer> {
   server.registerTool("system_exec", {
     description: "Execute one Registered Program directly. Check system_environment.argumentSemantics: native programs are literal; Windows .cmd/.bat Platform Wrappers are cmd-reparsed and reject %, !, &, |, <, >, ^, CR, LF, and NUL arguments. Even accepted wrapper arguments have narrower fidelity. Shell operators, pipelines, redirects, command substitution, and environment expansion are not supported.",
     inputSchema: {
-      program: programSchema.describe("Registered Logical Program name."), args: z.array(z.string()).optional().describe("Literal Argument Vector."),
+      program: programSchema.describe("Registered Logical Program name."), args: z.array(z.string()).optional().describe("Native programs receive literal arguments; Windows .cmd/.bat wrapper arguments are restricted and reparsed by cmd.exe."),
       cwd: z.string().optional().describe("Single-root: relative or absolute; multi-root: authorized absolute path."),
       timeoutMs: z.number().optional().describe("Positive timeout in milliseconds within the Program Policy."), input: z.string().optional().describe("Optional bounded Execution Input for a Program that permits it."),
     },

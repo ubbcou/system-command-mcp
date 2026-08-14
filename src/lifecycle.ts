@@ -9,6 +9,7 @@ const windowsContainment = "members in the per-request Job Object only; breakawa
 
 export interface LifecycleAdapter {
   terminate(reason: "timeout" | "cancelled", rootClosed: Promise<void>): Promise<ForcedTerminationOutcome>;
+  naturalClose(): Promise<ForcedTerminationOutcome | undefined>;
   close(): void;
 }
 
@@ -62,6 +63,7 @@ function unixLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: 
       const forced = await confirmGone(finalWaitMs);
       return { reason, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError, diagnostics: { adapter: "unix-process-group", containment } };
     },
+    async naturalClose() { return undefined; },
     close() {},
   };
 }
@@ -115,16 +117,19 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
       setTimeout(() => { try { process.kill(); } catch { /* best effort */ } finish("taskkill fallback timed out"); }, finalWaitMs).unref();
     });
   };
-  const accounting = async (): Promise<{ active?: number; cleanupError?: string }> => {
+  const activeMembers = (): { active?: number; cleanupError?: string } => {
     if (!job || !api.QueryInformationJobObject) return { cleanupError: "JOB_ACCOUNTING_QUERY_UNAVAILABLE" };
+    const info = Buffer.alloc(48);
+    if (!api.QueryInformationJobObject(job, 1, info, info.length, null)) return { cleanupError: "JOB_ACCOUNTING_QUERY_FAILED" };
+    return { active: info.readUInt32LE(40) };
+  };
+  const accounting = async (): Promise<{ active?: number; cleanupError?: string }> => {
     const deadline = Date.now() + finalWaitMs;
     for (;;) {
-      const info = Buffer.alloc(48);
-      if (!api.QueryInformationJobObject(job, 1, info, info.length, null)) return { cleanupError: "JOB_ACCOUNTING_QUERY_FAILED" };
-      const active = info.readUInt32LE(40);
-      if (active === 0) return { active };
+      const status = activeMembers();
+      if (status.cleanupError || status.active === 0) return status;
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return { active, cleanupError: "JOB_ACTIVE_PROCESSES_REMAIN" };
+      if (remaining <= 0) return { ...status, cleanupError: "JOB_ACTIVE_PROCESSES_REMAIN" };
       await wait(Math.min(25, remaining));
     }
   };
@@ -147,6 +152,14 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
       const rootExited = await rootExit;
       const status = await accounting();
       return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: !rootExited ? "FINAL_WAIT_EXPIRED" : status.cleanupError, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable", activeProcesses: status.active } };
+    },
+    async naturalClose() {
+      const status = activeMembers();
+      if (status.cleanupError || status.active === 0) return status.cleanupError ? { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: false, cleanupError: status.cleanupError, diagnostics: { adapter: "windows-job-object", containment: windowsContainment } } : undefined;
+      const terminated = !!api.TerminateJobObject?.(job, 137);
+      const error = terminated ? undefined : windowsError("TerminateJobObject", api.GetLastError);
+      const settled = await accounting();
+      return { reason: null, gracefulRequested: false, forceUsed: true, treeCleaned: terminated && settled.active === 0, cleanupError: settled.cleanupError ?? error, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, activeProcesses: settled.active } };
     },
     close() { if (closed) return; closed = true; if (processHandle) api.CloseHandle?.(processHandle); if (job) api.CloseHandle?.(job); processHandle = undefined; job = undefined; },
   };

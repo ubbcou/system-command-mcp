@@ -32,32 +32,30 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
     const adapter = createLifecycleAdapter(child, request.gracePeriodMs ?? 2_000, request.finalTerminationWaitMs ?? 5_000);
     let exited = false;
     let termination: Promise<ForcedTerminationOutcome> | undefined;
+    let terminationOutcome: ForcedTerminationOutcome | undefined;
     let resolveRootExit!: () => void;
     const rootClosed = new Promise<void>(resolveRoot => { resolveRootExit = resolveRoot; });
     const onStdoutData = (chunk: Buffer): void => stdout.append(chunk);
     const onStderrData = (chunk: Buffer): void => stderr.append(chunk);
     child.stdout?.on("data", onStdoutData); child.stderr?.on("data", onStderrData);
     const cleanup = (): void => { clearTimeout(timer); request.signal?.removeEventListener("abort", onAbort); child.stdout?.removeListener("data", onStdoutData); child.stderr?.removeListener("data", onStderrData); adapter.close(); };
-    const settleRejected = async (error: Error): Promise<void> => {
+    const settleRejected = (error: Error): void => {
       if (settled) return;
-      settled = true;
+      settled = true; cleanup(); reject(error);
+    };
+    const internalFailure = (error: Error): void => {
+      if (!child.pid) return settleRejected(error);
       reason ??= "cancelled";
       termination ??= adapter.terminate(reason, rootClosed);
-      try { await termination; } catch { /* preserve the original child/stdio failure */ }
-      cleanup();
-      reject(error);
+      void termination.then(outcome => { terminationOutcome = outcome; }, () => {});
+      // Stream failures have no reliable close event; preserve their original error after bounded cleanup.
+      void termination.finally(() => settleRejected(error));
     };
-    const internalFailure = (error: Error): void => { void settleRejected(error); };
     const claimTermination = (claimed: "timeout" | "cancelled"): void => {
       if (reason || exited || settled) return;
       reason = claimed;
       termination = adapter.terminate(claimed, rootClosed);
-      void termination.then(outcome => {
-        // A child close event can be lost after a stream or process failure. The bounded adapter settlement owns the terminal result.
-        if (settled) return;
-        settled = true; cleanup();
-        resolve({ exitCode: null, signal: null, stdout: stdout.result(), stderr: stderr.result(), timedOut: reason === "timeout", cancelled: reason === "cancelled", termination: outcome });
-      }, error => { void settleRejected(error instanceof Error ? error : new Error(String(error))); });
+      void termination.then(outcome => { terminationOutcome = outcome; }, error => { void settleRejected(error instanceof Error ? error : new Error(String(error))); });
     };
     const onAbort = (): void => claimTermination("cancelled");
     const timer = setTimeout(() => claimTermination("timeout"), request.timeoutMs); timer.unref();
@@ -69,11 +67,11 @@ export async function executeProgram(request: ExecuteRequest, options: { spawn?:
       if (settled) return;
       void (async () => {
         try {
-          const outcome: TerminationOutcome = termination ? await termination : { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } };
+          const outcome: TerminationOutcome = terminationOutcome ?? (termination ? await termination : await adapter.naturalClose() ?? { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } });
           if (settled) return;
           settled = true; cleanup();
           resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: reason === "timeout", cancelled: reason === "cancelled", termination: outcome });
-        } catch (error) { await settleRejected(error instanceof Error ? error : new Error(String(error))); }
+        } catch (error) { settleRejected(error instanceof Error ? error : new Error(String(error))); }
       })();
     });
   });

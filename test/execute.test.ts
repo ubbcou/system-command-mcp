@@ -15,7 +15,8 @@ test("executeProgram passes arguments literally without a shell", async () => {
     cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1024,
   });
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(result.termination, { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } });
+  if (process.platform === "win32" && result.termination?.forceUsed) assert.equal(result.termination.treeCleaned, true);
+  else assert.deepEqual(result.termination, { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } });
   assert.deepEqual(JSON.parse(result.stdout.text), values);
 });
 
@@ -161,4 +162,23 @@ test("executeProgram lets a natural exit claim the terminal state before a timeo
   });
   assert.equal(result.exitCode, 0);
   assert.equal(result.timedOut, false);
+});
+
+test("executeProgram retains final SIGTERM output until child close", { skip: process.platform === "win32" }, async () => {
+  const result = await executeProgram({
+    program: nodeProgram,
+    args: ["-e", "process.on('SIGTERM', () => { process.stdout.write('final-sigterm-output'); process.exit(0); }); setInterval(() => {}, 1000)"],
+    cwd: process.cwd(), timeoutMs: 30, gracePeriodMs: 100, finalTerminationWaitMs: 500, maxOutputBytes: 1024,
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.stdout.text, "final-sigterm-output");
+});
+
+test("executeProgram rejects spawn errors immediately before containment", async () => {
+  const error = new Error("spawn failure");
+  const started = Date.now();
+  await assert.rejects(executeProgram({
+    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, finalTerminationWaitMs: 500, maxOutputBytes: 1024,
+  }, { spawn: (() => { throw error; }) as never }), error);
+  assert.ok(Date.now() - started < 100);
 });
