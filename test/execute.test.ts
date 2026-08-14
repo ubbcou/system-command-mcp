@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { execPath } from "node:process";
 import test from "node:test";
 import { executeProgram } from "../src/execute.js";
@@ -60,6 +61,14 @@ test("executeProgram rejects and kills on stdin errors", async () => {
   child.stdin.emit("error", error);
   await assert.rejects(result, error);
   assert.equal(child.killed, true);
+});
+
+test("Windows lifecycle documents taskkill exit status as diagnostic only", () => {
+  const source = readFileSync(new URL("../src/lifecycle.js", import.meta.url), "utf8");
+  assert.match(source, /JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE/);
+  assert.match(source, /No BREAKAWAY_OK limit is set/);
+  assert.match(source, /exit code is diagnostic only/);
+  assert.match(source, /child\.kill\(\) is abrupt/);
 });
 
 test("executeProgram reports timeouts", async () => {

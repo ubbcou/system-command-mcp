@@ -55,6 +55,7 @@ const CloseHandle = kernel32?.func("bool __stdcall CloseHandle(void * handle)");
 const GetLastError = kernel32?.func("uint32_t __stdcall GetLastError()");
 const SetInformationJobObject = kernel32?.func("bool __stdcall SetInformationJobObject(void * job, uint32_t class_, void * info, uint32_t length)");
 const QueryInformationJobObject = kernel32?.func("bool __stdcall QueryInformationJobObject(void * job, uint32_t class_, void * info, uint32_t length, void * returnedLength)");
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
 function windowsLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: number): LifecycleAdapter {
   let job: unknown;
@@ -65,7 +66,9 @@ function windowsLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitM
     job = CreateJobObjectW(null, null);
     if (!job) setupError = `CreateJobObjectW: ${GetLastError()}`;
     else {
-      const limits = Buffer.alloc(144); limits.writeUInt32LE(0x00002000, 16);
+      // No BREAKAWAY_OK limit is set: Job members cannot intentionally break away through this Job.
+      // KILL_ON_JOB_CLOSE makes an unexpected runtime crash close the final handle and terminate Job members.
+      const limits = Buffer.alloc(144); limits.writeUInt32LE(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 16);
       if (!SetInformationJobObject?.(job, 9, limits, limits.length)) setupError = `SetInformationJobObject(KILL_ON_JOB_CLOSE): ${GetLastError()}`;
       processHandle = setupError ? undefined : OpenProcess(0x0101, false, child.pid);
       if (!processHandle) setupError = `OpenProcess: ${GetLastError()}`;
@@ -81,11 +84,12 @@ function windowsLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitM
       taskkill.once("close", code => resolve({ code, stdout, stderr }));
       taskkill.once("error", error => resolve({ code: null, stdout, stderr: String(error) }));
     });
-    return `taskkill /T /F exit=${result.code}; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}`;
+    return `taskkill /T /F observed exit=${result.code}; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}; exit code is diagnostic only`;
   };
   return {
     async terminate(reason, rootClosed) {
-      // Windows has no portable Job Object graceful-stop operation. This wait is the documented cooperative grace window.
+      // Windows child.kill() is abrupt, not a graceful tree-stop operation; do not call it here.
+      // Job Objects have no portable graceful-stop API, so this is only a cooperative grace window.
       const gracefulRequested = false;
       await Promise.race([rootClosed, wait(gracePeriodMs)]);
       if (setupError || !job || !TerminateJobObject || !GetLastError) {
@@ -97,13 +101,13 @@ function windowsLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitM
         const error = `TerminateJobObject: ${GetLastError()}`;
         const fallbackDiagnostic = await fallback();
         await Promise.race([rootClosed, wait(finalWaitMs)]);
-        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; pre-assignment and breakaway processes can escape", fallback: fallbackDiagnostic } };
+        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; breakaway is disabled, but pre-assignment processes can escape", fallback: fallbackDiagnostic } };
       }
       const rootExited = await Promise.race([rootClosed.then(() => true), wait(finalWaitMs).then(() => false)]);
       const accounting = Buffer.alloc(48);
       const queried = !!QueryInformationJobObject?.(job, 1, accounting, accounting.length, null);
       const activeProcesses = queried ? accounting.readUInt32LE(40) : undefined;
-      return { reason, gracefulRequested, forceUsed: true, treeCleaned: rootExited && activeProcesses === 0, cleanupError: queried ? undefined : `QueryInformationJobObject: ${GetLastError?.() ?? "unavailable"}`, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; pre-assignment and breakaway processes can escape", activeProcesses } };
+      return { reason, gracefulRequested, forceUsed: true, treeCleaned: rootExited && activeProcesses === 0, cleanupError: queried ? undefined : `QueryInformationJobObject: ${GetLastError?.() ?? "unavailable"}`, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; breakaway is disabled, but pre-assignment processes can escape", activeProcesses } };
     },
     close() { if (processHandle) CloseHandle?.(processHandle); if (job) CloseHandle?.(job); },
   };
