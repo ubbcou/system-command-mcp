@@ -96,6 +96,23 @@ test("Program Manifest validates inactive platform definitions", () => {
   }), /unknown field/);
 });
 
+test("Program Manifest validates logical names, candidates, and pathExt", () => {
+  for (const name of ["", "1node", "node.name", "a".repeat(33)]) assert.throws(() => parseProgramManifest({ version: 1, programs: { [name]: { candidates: ["node"] } } }), /INVALID_MANIFEST/);
+  assert.throws(() => parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"] } }, platforms: { [process.platform]: { programs: { node: { candidates: [""] } } } } }), /candidates/);
+  assert.throws(() => parseProgramManifest({ version: 1, pathExt: [".EXE"], programs: { node: { candidates: ["node"] } } }), /pathExt/);
+  assert.throws(() => parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"] } }, platforms: { inactive: { pathExt: [".EXE"] } } }), /pathExt/);
+  const parsed = parseProgramManifest({ version: 1, pathExt: ".EXE", programs: { node: { candidates: ["node"] } }, platforms: { [process.platform]: { pathExt: ".CMD" } } });
+  assert.equal(parsed.pathExt, ".CMD");
+});
+
+test("Configured Mode uses only configured pathExt", async () => {
+  const runtime = await createCommandRuntime({
+    roots: [root], platform: "win32", environment: { Path: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), pathext: ".EXE" },
+    manifest: { version: 1, pathExt: ".CMD", searchPath: [execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")))], programs: { node: { candidates: ["node"], required: false } } },
+  });
+  try { assert.equal((await runtime.inspectEnvironment()).programs.node, undefined); } finally { await runtime.close(); }
+});
+
 test("Command Runtime snapshots environment references", async () => {
   const environment = { PATH: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), SECRET: "first" };
   const runtime = await createCommandRuntime({

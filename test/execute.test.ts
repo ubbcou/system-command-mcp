@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { execPath } from "node:process";
 import test from "node:test";
 import { executeProgram } from "../src/execute.js";
@@ -41,16 +42,21 @@ test("executeProgram reports timeouts", async () => {
   assert.notEqual(result.exitCode, 0);
 });
 
-test("executeProgram does not let a late abort relabel a natural exit", async () => {
+test("executeProgram lets exit claim completion before aborting prior to close", async () => {
   const controller = new AbortController();
-  const result = await executeProgram({
-    program: nodeProgram, args: ["-e", "process.exit(0)"],
-    cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024, signal: controller.signal,
-  });
+  const child = new EventEmitter() as EventEmitter & { stdout: undefined; stderr: undefined; stdin: undefined; killed: boolean; kill(): void };
+  child.stdout = undefined; child.stderr = undefined; child.stdin = undefined; child.killed = false;
+  child.kill = () => { child.killed = true; };
+  const result = executeProgram({
+    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024, signal: controller.signal,
+  }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
+  child.emit("exit", 0, null);
   controller.abort();
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.cancelled, false);
-  assert.equal(result.timedOut, false);
+  child.emit("close", 0, null);
+  const outcome = await result;
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.cancelled, false);
+  assert.equal(outcome.timedOut, false);
 });
 
 test("executeProgram lets a natural exit claim the terminal state before a timeout", async () => {

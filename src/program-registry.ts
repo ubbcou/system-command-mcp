@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { access } from "node:fs/promises";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { access, readdir } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { EnvironmentSnapshot, RegisteredProgram } from "./types.js";
 
@@ -38,6 +38,15 @@ async function isExecutable(path: string, platform: NodeJS.Platform): Promise<bo
   }
 }
 
+async function windowsPath(path: string): Promise<string | undefined> {
+  try {
+    const name = (await readdir(dirname(path))).find(name => name.toLowerCase() === basename(path).toLowerCase());
+    return name && join(dirname(path), name);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveExecutable(
   candidates: readonly string[],
   options: Pick<RegistryOptions, "path" | "pathExt" | "platform" | "manifestDirectory"> = {},
@@ -45,7 +54,7 @@ export async function resolveExecutable(
   const platform = options.platform ?? process.platform;
   const pathDelimiter = platform === "win32" ? ";" : ":";
   const directories = (options.path ?? process.env.PATH ?? "").split(pathDelimiter).filter(Boolean);
-  const extensions = executableExtensions(platform, options.pathExt ?? process.env.PATHEXT);
+  const extensions = executableExtensions(platform, options.pathExt);
 
   for (const candidate of candidates) {
     const manifestRelative = candidate.startsWith("./") || candidate.startsWith("../");
@@ -61,7 +70,8 @@ export async function resolveExecutable(
       }
       for (const extension of extensions) {
         const path = join(directory, platform === "win32" ? file + extension : file);
-        if (await isExecutable(path, platform)) return path;
+        const actual = platform === "win32" ? await windowsPath(path) : path;
+        if (actual && await isExecutable(actual, platform)) return actual;
       }
     }
   }

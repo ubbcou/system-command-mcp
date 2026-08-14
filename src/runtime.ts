@@ -9,7 +9,7 @@ export interface ManifestProgram { candidates: string[]; required?: boolean; ena
 export interface EnvironmentReference { fromEnvironment: string; required?: boolean; }
 export type EnvironmentValue = string | EnvironmentReference;
 export interface EnvironmentLayer { remove?: string[]; set?: Record<string, EnvironmentValue>; }
-export interface ProgramManifest { version: 1; searchPath?: string[]; allowInheritedPath?: boolean; environment?: EnvironmentLayer; programs: Record<string, ManifestProgram>; platforms?: Record<string, { searchPath?: string[]; allowInheritedPath?: boolean; environment?: EnvironmentLayer; programs?: Record<string, Partial<ManifestProgram>> }>; }
+export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; programs: Record<string, ManifestProgram>; platforms?: Record<string, { searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; programs?: Record<string, Partial<ManifestProgram>> }>; }
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult>; close(): Promise<void>; }
@@ -20,6 +20,7 @@ const MAX_ARGS = 4_096;
 const MAX_ARG_BYTES = 64 * 1024;
 const MAX_ARG_TOTAL_BYTES = 256 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
+const LOGICAL_PROGRAM_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 const object = (value: unknown, path: string): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`INVALID_MANIFEST: ${path} must be an object`); return value as Record<string, unknown>; };
 const unknownFields = (value: Record<string, unknown>, allowed: readonly string[], path: string): void => { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`INVALID_MANIFEST: unknown field ${path}.${key}`); };
 
@@ -44,7 +45,7 @@ function policy(value: unknown, path: string): ProgramPolicy | undefined {
 function program(value: unknown, path: string, partial = false): ManifestProgram | Partial<ManifestProgram> {
   const result = object(value, path); unknownFields(result, ["candidates", "required", "enabled", "policy", "environment"], path);
   if (!partial && (!Array.isArray(result.candidates) || result.candidates.length === 0 || !result.candidates.every(x => typeof x === "string" && x.length > 0))) throw new Error(`INVALID_MANIFEST: ${path}.candidates`);
-  if (partial && result.candidates !== undefined && (!Array.isArray(result.candidates) || result.candidates.length === 0 || !result.candidates.every(x => typeof x === "string"))) throw new Error(`INVALID_MANIFEST: ${path}.candidates`);
+  if (partial && result.candidates !== undefined && (!Array.isArray(result.candidates) || result.candidates.length === 0 || !result.candidates.every(x => typeof x === "string" && x.length > 0))) throw new Error(`INVALID_MANIFEST: ${path}.candidates`);
   if (result.required !== undefined && typeof result.required !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.required`);
   if (result.enabled !== undefined && typeof result.enabled !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.enabled`);
   return { ...result, policy: policy(result.policy, `${path}.policy`), environment: layer(result.environment, `${path}.environment`) } as ManifestProgram;
@@ -53,22 +54,28 @@ function mergeLayer(base?: EnvironmentLayer, override?: EnvironmentLayer): Envir
 function mergeProgram(base: ManifestProgram, override?: Partial<ManifestProgram>): ManifestProgram { return { ...base, ...override, candidates: override?.candidates ?? base.candidates, policy: { ...base.policy, ...override?.policy }, environment: mergeLayer(base.environment, override?.environment) }; }
 
 export function parseProgramManifest(value: unknown, platform: NodeJS.Platform = process.platform): ProgramManifest {
-  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "allowInheritedPath", "environment", "programs", "platforms"], "manifest");
+  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "programs", "platforms"], "manifest");
   if (root.version !== 1) throw new Error("INVALID_MANIFEST: version must be 1");
   if (!root.programs) throw new Error("INVALID_MANIFEST: programs is required");
   if (root.searchPath !== undefined && (!Array.isArray(root.searchPath) || !root.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");
+  if (root.pathExt !== undefined && typeof root.pathExt !== "string") throw new Error("INVALID_MANIFEST: pathExt");
   if (root.allowInheritedPath !== undefined && typeof root.allowInheritedPath !== "boolean") throw new Error("INVALID_MANIFEST: allowInheritedPath");
-  const programs = Object.fromEntries(Object.entries(object(root.programs, "manifest.programs")).map(([name, definition]) => [name, program(definition, `manifest.programs.${name}`) as ManifestProgram]));
+  const programs = Object.fromEntries(Object.entries(object(root.programs, "manifest.programs")).map(([name, definition]) => {
+    if (!LOGICAL_PROGRAM_NAME.test(name)) throw new Error(`INVALID_MANIFEST: manifest.programs.${name}`);
+    return [name, program(definition, `manifest.programs.${name}`) as ManifestProgram];
+  }));
   for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
   const platformOverrides: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(platforms)) {
-    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "allowInheritedPath", "environment", "programs"], `manifest.platforms.${name}`);
+    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "pathExt", "allowInheritedPath", "environment", "programs"], `manifest.platforms.${name}`);
     if (item.searchPath !== undefined && (!Array.isArray(item.searchPath) || !item.searchPath.every(x => typeof x === "string"))) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.searchPath`);
+    if (item.pathExt !== undefined && typeof item.pathExt !== "string") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.pathExt`);
     if (item.allowInheritedPath !== undefined && typeof item.allowInheritedPath !== "boolean") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.allowInheritedPath`);
     layer(item.environment, `manifest.platforms.${name}.environment`);
     const overrides = item.programs === undefined ? {} : object(item.programs, `manifest.platforms.${name}.programs`);
     for (const [programName, definition] of Object.entries(overrides)) {
+      if (!LOGICAL_PROGRAM_NAME.test(programName)) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.programs.${programName}`);
       const parsed = program(definition, `manifest.platforms.${name}.programs.${programName}`, true) as Partial<ManifestProgram>;
       if (!programs[programName]) throw new Error(`INVALID_MANIFEST: platform program ${programName} has no base definition`);
       if (programs[programName].required && parsed.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be disabled`);
@@ -78,10 +85,11 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const override = platformOverrides[platform] ?? {};
   const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
   for (const [name, item] of Object.entries(overrides)) programs[name] = mergeProgram(programs[name]!, program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>);
-  return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
+  return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
 }
 
 function isInside(root: string, candidate: string): boolean { const child = relative(root, candidate); return child === "" || (!child.startsWith("..") && !isAbsolute(child)); }
+function get(environment: Record<string, string>, key: string, platform: NodeJS.Platform): string | undefined { return platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1] : environment[key]; }
 function set(environment: Record<string, string>, key: string, value: string, platform: NodeJS.Platform): void { const actual = platform === "win32" ? Object.keys(environment).find(existing => existing.toLowerCase() === key.toLowerCase()) ?? key : key; environment[actual] = value; }
 function remove(environment: Record<string, string>, key: string, platform: NodeJS.Platform): void { for (const existing of Object.keys(environment)) if (platform !== "win32" ? existing === key : existing.toLowerCase() === key.toLowerCase()) delete environment[existing]; }
 function applyLayer(environment: Record<string, string>, input: NodeJS.ProcessEnv, layer: EnvironmentLayer | undefined, platform: NodeJS.Platform): void { for (const key of layer?.remove ?? []) remove(environment, key, platform); for (const [key, value] of Object.entries(layer?.set ?? {})) { if (typeof value === "string") set(environment, key, value, platform); else { const found = platform === "win32" ? Object.entries(input).find(([name]) => name.toLowerCase() === value.fromEnvironment.toLowerCase())?.[1] : input[value.fromEnvironment]; if (found === undefined) { if (value.required !== false) throw new Error(`MISSING_ENVIRONMENT_REFERENCE: ${value.fromEnvironment}`); remove(environment, key, platform); } else set(environment, key, found, platform); } } }
@@ -101,6 +109,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     const pathKey = platform === "win32" ? Object.keys(environment).find(key => key.toLowerCase() === "path") ?? "PATH" : "PATH";
     const paths = [...(manifest.searchPath ?? []), ...(manifest.allowInheritedPath ? [environment[pathKey] ?? ""] : [])].filter(Boolean);
     environment[pathKey] = paths.join(platform === "win32" ? ";" : delimiter);
+    if (platform === "win32") set(environment, "PATHEXT", manifest.pathExt ?? ".COM;.EXE;.BAT;.CMD", platform);
     applyLayer(environment, input, manifest.environment, platform);
   }
   const definitions: Record<string, ManifestProgram> = manifest?.programs ?? Object.fromEntries(Object.entries(DEFAULT_ALIASES).filter(([name]) => name !== "powershell").map(([name, candidates]) => [name, { candidates: [...candidates] }]));
@@ -109,7 +118,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   for (const [logicalName, definition] of Object.entries(definitions)) {
     if (definition.enabled === false) continue;
     const perProgramEnvironment = { ...environment }; applyLayer(perProgramEnvironment, input, definition.environment, platform);
-    const executable = await resolveExecutable(definition.candidates, { platform, manifestDirectory, path: perProgramEnvironment[platform === "win32" ? Object.keys(perProgramEnvironment).find(k => k.toLowerCase() === "path") ?? "PATH" : "PATH"], pathExt: perProgramEnvironment.PATHEXT });
+    const executable = await resolveExecutable(definition.candidates, { platform, manifestDirectory, path: get(perProgramEnvironment, "PATH", platform), pathExt: get(perProgramEnvironment, "PATHEXT", platform) });
     if (!executable) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
     programs[logicalName] = { logicalName, executable, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
   }

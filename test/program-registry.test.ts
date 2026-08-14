@@ -36,6 +36,13 @@ test("resolveExecutable uses Windows PATH and PATHEXT semantics", async () => {
   assert.equal(actual, expected);
 });
 
+test("resolveExecutable normalizes configured Windows PATHEXT casing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "system-command-mcp-win-case-"));
+  const expected = await executable(dir, "tool.EXE");
+  const actual = await resolveExecutable(["tool"], { path: dir, pathExt: ".exe", platform: "win32" });
+  assert.equal(actual, expected);
+});
+
 test("inspectEnvironment exposes only installed logical programs", async () => {
   const dir = await mkdtemp(join(tmpdir(), "system-command-mcp-registry-"));
   const suffix = process.platform === "win32" ? ".exe" : "";

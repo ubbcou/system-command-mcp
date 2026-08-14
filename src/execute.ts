@@ -34,14 +34,15 @@ class TailBuffer {
   }
 }
 
-export async function executeProgram(request: ExecuteRequest): Promise<ExecuteResult> {
+export async function executeProgram(request: ExecuteRequest, options: { spawn?: typeof spawn } = {}): Promise<ExecuteResult> {
+  const spawnProcess = options.spawn ?? spawn;
   const stdout = new TailBuffer(request.maxOutputBytes);
   const stderr = new TailBuffer(request.maxOutputBytes);
   let termination: "timeout" | "cancelled" | undefined;
   let terminalClaimed = false;
 
   return new Promise<ExecuteResult>((resolve, reject) => {
-    const child = spawn(request.program.executable, [...request.args], {
+    const child = spawnProcess(request.program.executable, [...request.args], {
       cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     child.stdout?.on("data", (chunk: Buffer) => stdout.append(chunk));
@@ -54,7 +55,12 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
     timer.unref();
     request.signal?.addEventListener("abort", onAbort, { once: true });
     if (request.signal?.aborted) onAbort();
-    child.once("exit", () => { if (!terminalClaimed) cleanup(); });
+    child.once("exit", () => {
+      if (!terminalClaimed) {
+        terminalClaimed = true;
+        cleanup();
+      }
+    });
     const fail = (error: Error): void => {
       if (terminalClaimed) return;
       terminalClaimed = true;
