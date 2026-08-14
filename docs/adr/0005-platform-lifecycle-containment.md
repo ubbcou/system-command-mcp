@@ -1,0 +1,3 @@
+# Platform lifecycle adapters contain request members
+
+The runtime reports cleanup only for processes contained by its platform Lifecycle Adapter, not every descendant that could deliberately escape containment. Windows uses a per-request Job Object implemented through `koffi`, with forced `taskkill /T /F` as an unconfirmed fallback; Unix uses a runner-created process group. `treeCleaned` is true only after bounded confirmation that no contained member remains, false when containment or confirmation fails, and null after natural completion. Windows `.cmd` and `.bat` Platform Wrappers do not provide the same arbitrary literal-argument guarantee as native executables because cmd.exe reparses their arguments.
