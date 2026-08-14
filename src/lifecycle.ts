@@ -63,7 +63,17 @@ function unixLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: 
       const forced = await confirmGone(finalWaitMs);
       return { reason, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError, diagnostics: { adapter: "unix-process-group", containment } };
     },
-    async naturalClose() { return undefined; },
+    async naturalClose() {
+      const state = groupGone();
+      if (state === true) return undefined;
+      const gracefulError = signalGroup("SIGTERM");
+      const gracefulRequested = gracefulError === undefined;
+      const graceful = await confirmGone(gracePeriodMs);
+      if (graceful.cleaned) return { reason: null, gracefulRequested, forceUsed: false, treeCleaned: true, cleanupError: gracefulError, diagnostics: { adapter: "unix-process-group", containment } };
+      const forceError = signalGroup("SIGKILL");
+      const forced = await confirmGone(finalWaitMs);
+      return { reason: null, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError ?? (typeof state === "string" ? state : undefined), diagnostics: { adapter: "unix-process-group", containment } };
+    },
     close() {},
   };
 }
@@ -155,11 +165,14 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
     },
     async naturalClose() {
       const status = activeMembers();
-      if (status.cleanupError || status.active === 0) return status.cleanupError ? { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: false, cleanupError: status.cleanupError, diagnostics: { adapter: "windows-job-object", containment: windowsContainment } } : undefined;
+      const diagnostics = { adapter: "windows-job-object", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable" };
+      // Closing this Job may force members through KILL_ON_JOB_CLOSE, so a failed query is still forced and unverified.
+      if (status.cleanupError) return { reason: null, gracefulRequested: false, forceUsed: true, treeCleaned: false, cleanupError: status.cleanupError, diagnostics };
+      if (status.active === 0) return undefined;
       const terminated = !!api.TerminateJobObject?.(job, 137);
       const error = terminated ? undefined : windowsError("TerminateJobObject", api.GetLastError);
       const settled = await accounting();
-      return { reason: null, gracefulRequested: false, forceUsed: true, treeCleaned: terminated && settled.active === 0, cleanupError: settled.cleanupError ?? error, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, activeProcesses: settled.active } };
+      return { reason: null, gracefulRequested: false, forceUsed: true, treeCleaned: false, cleanupError: settled.cleanupError ?? error, diagnostics: { ...diagnostics, activeProcesses: settled.active } };
     },
     close() { if (closed) return; closed = true; if (processHandle) api.CloseHandle?.(processHandle); if (job) api.CloseHandle?.(job); processHandle = undefined; job = undefined; },
   };

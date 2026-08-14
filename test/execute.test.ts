@@ -15,8 +15,10 @@ test("executeProgram passes arguments literally without a shell", async () => {
     cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1024,
   });
   assert.equal(result.exitCode, 0);
-  if (process.platform === "win32" && result.termination?.forceUsed) assert.equal(result.termination.treeCleaned, true);
-  else assert.deepEqual(result.termination, { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } });
+  if (process.platform === "win32" && result.termination?.forceUsed) {
+    assert.equal(result.termination.treeCleaned, false);
+    assert.equal(result.termination.diagnostics.containmentRace, "pre-assignment-unverifiable");
+  } else assert.deepEqual(result.termination, { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } });
   assert.deepEqual(JSON.parse(result.stdout.text), values);
 });
 
@@ -108,6 +110,24 @@ test("Unix cleanup confirms only its process group, not an escaped descendant", 
     assert.doesNotThrow(() => process.kill(escapedPid, 0));
   } finally {
     try { process.kill(escapedPid, "SIGKILL"); } catch { /* escaped process already ended */ }
+  }
+});
+
+test("Unix natural root exit force-cleans a process-group descendant without inherited stdio", { skip: process.platform === "win32" }, async () => {
+  const result = await executeProgram({
+    program: nodeProgram,
+    args: ["-e", "const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:'ignore'}); child.unref(); console.log(child.pid)"],
+    cwd: process.cwd(), timeoutMs: 5_000, gracePeriodMs: 20, finalTerminationWaitMs: 500, maxOutputBytes: 1024,
+  });
+  const descendantPid = Number(result.stdout.text.trim());
+  try {
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(result.termination, {
+      reason: null, gracefulRequested: true, forceUsed: true, treeCleaned: true,
+      diagnostics: { adapter: "unix-process-group", containment: "runner-created process group; descendants that create another session or process group escape containment" },
+    });
+  } finally {
+    try { process.kill(descendantPid, "SIGKILL"); } catch { /* lifecycle cleanup succeeded */ }
   }
 });
 

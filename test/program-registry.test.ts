@@ -51,7 +51,7 @@ test("inspectEnvironment exposes only installed logical programs", async () => {
   const snapshot = await inspectEnvironment({
     cwd: dir, path: dir, aliases: { tool: ["missing-tool", "real-tool"], missing: ["missing"] },
   });
-  assert.equal(snapshot.programs.tool?.executable, path);
+  assert.equal(snapshot.programs.tool?.executable, await realpath(path));
   assert.equal(snapshot.programs.tool?.declaredCandidate, "real-tool");
   assert.equal(snapshot.programs.missing, undefined);
 });

@@ -65,7 +65,7 @@ test("Windows lifecycle bounds failed Job termination fallback", async () => {
   adapter.close();
 });
 
-test("Windows natural close force-cleans remaining Job members", async () => {
+test("Windows natural close force-cleans remaining Job members without claiming containment", async () => {
   const calls: string[] = [];
   const adapter = createLifecycleAdapter(child() as never, 500, 20, {
     platform: "win32",
@@ -76,8 +76,29 @@ test("Windows natural close force-cleans remaining Job members", async () => {
     },
   });
   const outcome = await adapter.naturalClose();
+  assert.equal(outcome?.reason, null);
   assert.equal(outcome?.forceUsed, true);
   assert.equal(outcome?.treeCleaned, false);
+  assert.equal(outcome?.diagnostics.containmentRace, "pre-assignment-unverifiable");
   adapter.close();
   assert.deepEqual(calls, ["terminate", "close:process", "close:job"]);
+});
+
+test("Windows natural close reports pre-close accounting failure as forced and unverified", async () => {
+  const calls: string[] = [];
+  const adapter = createLifecycleAdapter(child() as never, 500, 20, {
+    platform: "win32",
+    windowsApis: {
+      CreateJobObjectW: () => "job", SetInformationJobObject: () => true, OpenProcess: () => "process", AssignProcessToJobObject: () => true,
+      GetLastError: () => 0, CloseHandle: handle => { calls.push(`close:${handle}`); return true; },
+      QueryInformationJobObject: () => false,
+    },
+  });
+  const outcome = await adapter.naturalClose();
+  assert.deepEqual(outcome, {
+    reason: null, gracefulRequested: false, forceUsed: true, treeCleaned: false, cleanupError: "JOB_ACCOUNTING_QUERY_FAILED",
+    diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; breakaway is disabled, but pre-assignment processes can escape", containmentRace: "pre-assignment-unverifiable" },
+  });
+  adapter.close();
+  assert.deepEqual(calls, ["close:process", "close:job"]);
 });
