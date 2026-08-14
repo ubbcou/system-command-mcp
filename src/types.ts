@@ -19,6 +19,8 @@ export interface ExecuteRequest {
   args: readonly string[];
   cwd: string;
   timeoutMs: number;
+  gracePeriodMs?: number;
+  finalTerminationWaitMs?: number;
   signal?: AbortSignal;
   maxOutputBytes: number;
   input?: string;
@@ -31,6 +33,15 @@ export interface StreamOutput {
   totalBytes: number;
 }
 
+export interface TerminationOutcome {
+  reason: "timeout" | "cancelled";
+  gracefulRequested: boolean;
+  forceUsed: boolean;
+  treeCleaned: boolean;
+  cleanupError?: string;
+  diagnostics: Record<string, unknown>;
+}
+
 export interface ExecuteResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -38,4 +49,5 @@ export interface ExecuteResult {
   stderr: StreamOutput;
   timedOut: boolean;
   cancelled: boolean;
+  termination: TerminationOutcome | null;
 }

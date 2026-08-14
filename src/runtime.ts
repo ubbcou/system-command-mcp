@@ -4,7 +4,7 @@ import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
 
-export interface ProgramPolicy { defaultTimeoutMs?: number; maxTimeoutMs?: number; allowStdin?: boolean; }
+export interface ProgramPolicy { defaultTimeoutMs?: number; maxTimeoutMs?: number; allowStdin?: boolean; gracePeriodMs?: number; finalTerminationWaitMs?: number; }
 export interface ManifestProgram { candidates: string[]; required?: boolean; enabled?: boolean; policy?: ProgramPolicy; environment?: EnvironmentLayer; }
 export interface EnvironmentReference { fromEnvironment: string; required?: boolean; }
 export type EnvironmentValue = string | EnvironmentReference;
@@ -13,7 +13,7 @@ export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: 
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult>; close(): Promise<void>; }
-export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; maxOutputBytes?: number; maxConcurrentExecutions?: number; }
+export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; gracePeriodMs?: number; finalTerminationWaitMs?: number; maxOutputBytes?: number; maxConcurrentExecutions?: number; }
 
 const MAX_TIMEOUT = 600_000;
 const MAX_CONCURRENT_EXECUTIONS = 1_024;
@@ -21,6 +21,7 @@ const MAX_ARGS = 4_096;
 const MAX_ARG_BYTES = 64 * 1024;
 const MAX_ARG_TOTAL_BYTES = 256 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
+const MAX_TERMINATION_WAIT = 60_000;
 const LOGICAL_PROGRAM_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 const object = (value: unknown, path: string): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`INVALID_MANIFEST: ${path} must be an object`); return value as Record<string, unknown>; };
 const unknownFields = (value: Record<string, unknown>, allowed: readonly string[], path: string): void => { for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`INVALID_MANIFEST: unknown field ${path}.${key}`); };
@@ -38,8 +39,9 @@ function layer(value: unknown, path: string): EnvironmentLayer | undefined {
 }
 function policy(value: unknown, path: string): ProgramPolicy | undefined {
   if (value === undefined) return undefined;
-  const result = object(value, path); unknownFields(result, ["defaultTimeoutMs", "maxTimeoutMs", "allowStdin"], path);
+  const result = object(value, path); unknownFields(result, ["defaultTimeoutMs", "maxTimeoutMs", "allowStdin", "gracePeriodMs", "finalTerminationWaitMs"], path);
   for (const name of ["defaultTimeoutMs", "maxTimeoutMs"] as const) if (result[name] !== undefined && (!Number.isInteger(result[name]) || (result[name] as number) <= 0 || (result[name] as number) > MAX_TIMEOUT)) throw new Error(`INVALID_MANIFEST: ${path}.${name}`);
+  for (const name of ["gracePeriodMs", "finalTerminationWaitMs"] as const) if (result[name] !== undefined && (!Number.isInteger(result[name]) || (result[name] as number) <= 0 || (result[name] as number) > MAX_TERMINATION_WAIT)) throw new Error(`INVALID_MANIFEST: ${path}.${name}`);
   if (result.allowStdin !== undefined && typeof result.allowStdin !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.allowStdin`);
   return { ...result } as ProgramPolicy;
 }
@@ -158,7 +160,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
       const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);
-      return executeProgram({ program: definition, args, cwd, timeoutMs, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, input: request.input, environment: childEnvironment });
+      return executeProgram({ program: definition, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, input: request.input, environment: childEnvironment });
     })();
     active.set(execution, controller);
     return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });

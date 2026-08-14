@@ -32,6 +32,12 @@ test("Program Manifest v1 rejects unknown fields and merges platform program fie
   });
 });
 
+test("Program Manifest accepts bounded lifecycle policy", () => {
+  const parsed = parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"], policy: { gracePeriodMs: 10, finalTerminationWaitMs: 20 } } } });
+  assert.equal(parsed.programs.node?.policy?.gracePeriodMs, 10);
+  assert.throws(() => parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"], policy: { gracePeriodMs: 0 } } } }), /gracePeriodMs/);
+});
+
 test("Configured Mode uses one layered execution environment for registration and spawn", async () => {
   const runtime = await createCommandRuntime({
     roots: [root],
@@ -197,6 +203,7 @@ test("a pre-aborted signal returns only the cancelled terminal state", async () 
     const result = await runtime.execute({ program: "node", args: ["-e", "setTimeout(() => {}, 1000)"], cwd: ".", timeoutMs: 30, signal: controller.signal });
     assert.equal(result.cancelled, true);
     assert.equal(result.timedOut, false);
+    assert.equal(result.termination?.reason, "cancelled");
   } finally { await runtime.close(); }
 });
 

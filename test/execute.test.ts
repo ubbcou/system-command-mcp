@@ -14,6 +14,7 @@ test("executeProgram passes arguments literally without a shell", async () => {
     cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1024,
   });
   assert.equal(result.exitCode, 0);
+  assert.equal(result.termination, null);
   assert.deepEqual(JSON.parse(result.stdout.text), values);
 });
 
@@ -67,7 +68,21 @@ test("executeProgram reports timeouts", async () => {
     cwd: process.cwd(), timeoutMs: 30, maxOutputBytes: 1024,
   });
   assert.equal(result.timedOut, true);
+  assert.equal(result.termination?.reason, "timeout");
+  assert.equal(result.termination?.treeCleaned, true);
   assert.notEqual(result.exitCode, 0);
+});
+
+test("executeProgram escalates after the configured Unix grace period", { skip: process.platform === "win32" }, async () => {
+  const result = await executeProgram({
+    program: nodeProgram,
+    args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
+    cwd: process.cwd(), timeoutMs: 30, gracePeriodMs: 20, finalTerminationWaitMs: 500, maxOutputBytes: 1024,
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.termination?.gracefulRequested, true);
+  assert.equal(result.termination?.forceUsed, true);
+  assert.equal(result.termination?.treeCleaned, true);
 });
 
 test("executeProgram lets exit claim completion before aborting prior to close", async () => {
