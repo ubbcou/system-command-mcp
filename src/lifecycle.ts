@@ -1,13 +1,32 @@
 import { spawn as spawnChild } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import koffi from "koffi";
-import type { TerminationOutcome } from "./types.js";
+import type { ForcedTerminationOutcome } from "./types.js";
 
 const wait = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds));
+const containment = "runner-created process group; descendants that create another session or process group escape containment";
+const windowsContainment = "members in the per-request Job Object only; breakaway is disabled, but pre-assignment processes can escape";
 
 export interface LifecycleAdapter {
-  terminate(reason: "timeout" | "cancelled", rootClosed: Promise<void>): Promise<TerminationOutcome>;
+  terminate(reason: "timeout" | "cancelled", rootClosed: Promise<void>): Promise<ForcedTerminationOutcome>;
   close(): void;
+}
+
+type WindowsApis = {
+  CreateJobObjectW: (securityAttributes: unknown, name: unknown) => unknown;
+  OpenProcess: (access: number, inheritHandle: boolean, processId: number) => unknown;
+  AssignProcessToJobObject: (job: unknown, process: unknown) => boolean;
+  TerminateJobObject: (job: unknown, exitCode: number) => boolean;
+  CloseHandle: (handle: unknown) => boolean;
+  GetLastError: () => number;
+  SetInformationJobObject: (job: unknown, class_: number, info: Buffer, length: number) => boolean;
+  QueryInformationJobObject: (job: unknown, class_: number, info: Buffer, length: number, returnedLength: unknown) => boolean;
+};
+
+export interface LifecycleAdapterOptions {
+  platform?: NodeJS.Platform;
+  windowsApis?: Partial<WindowsApis>;
+  spawnTaskkill?: typeof spawnChild;
 }
 
 function unixLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: number): LifecycleAdapter {
@@ -28,8 +47,9 @@ function unixLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: 
       const state = groupGone();
       if (state === true) return { cleaned: true };
       if (typeof state === "string") return { cleaned: false, error: state };
-      if (Date.now() >= deadline) return { cleaned: false };
-      await wait(Math.min(25, deadline - Date.now()));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { cleaned: false, error: "FINAL_WAIT_EXPIRED" };
+      await wait(Math.min(25, remaining));
     }
   };
   return {
@@ -37,82 +57,101 @@ function unixLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: 
       const gracefulError = signalGroup("SIGTERM");
       const gracefulRequested = gracefulError === undefined;
       const graceful = await confirmGone(gracePeriodMs);
-      if (graceful.cleaned) return { reason, gracefulRequested, forceUsed: false, treeCleaned: true, cleanupError: gracefulError, diagnostics: { adapter: "unix-process-group", containment: "runner-created process group; descendants that create another session or process group escape containment" } };
+      if (graceful.cleaned) return { reason, gracefulRequested, forceUsed: false, treeCleaned: true, cleanupError: gracefulError, diagnostics: { adapter: "unix-process-group", containment } };
       const forceError = signalGroup("SIGKILL");
       const forced = await confirmGone(finalWaitMs);
-      return { reason, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError, diagnostics: { adapter: "unix-process-group", containment: "runner-created process group; descendants that create another session or process group escape containment" } };
+      return { reason, gracefulRequested, forceUsed: true, treeCleaned: forced.cleaned && forceError === undefined, cleanupError: forced.error ?? forceError ?? gracefulError, diagnostics: { adapter: "unix-process-group", containment } };
     },
     close() {},
   };
 }
 
 const kernel32 = process.platform === "win32" ? koffi.load("kernel32.dll") : undefined;
-const CreateJobObjectW = kernel32?.func("void * __stdcall CreateJobObjectW(void * securityAttributes, const char16_t * name)");
-const OpenProcess = kernel32?.func("void * __stdcall OpenProcess(uint32_t access, bool inheritHandle, uint32_t processId)");
-const AssignProcessToJobObject = kernel32?.func("bool __stdcall AssignProcessToJobObject(void * job, void * process)");
-const TerminateJobObject = kernel32?.func("bool __stdcall TerminateJobObject(void * job, uint32_t exitCode)");
-const CloseHandle = kernel32?.func("bool __stdcall CloseHandle(void * handle)");
-const GetLastError = kernel32?.func("uint32_t __stdcall GetLastError()");
-const SetInformationJobObject = kernel32?.func("bool __stdcall SetInformationJobObject(void * job, uint32_t class_, void * info, uint32_t length)");
-const QueryInformationJobObject = kernel32?.func("bool __stdcall QueryInformationJobObject(void * job, uint32_t class_, void * info, uint32_t length, void * returnedLength)");
+const nativeWindowsApis: Partial<WindowsApis> = {
+  CreateJobObjectW: kernel32?.func("void * __stdcall CreateJobObjectW(void * securityAttributes, const char16_t * name)"),
+  OpenProcess: kernel32?.func("void * __stdcall OpenProcess(uint32_t access, bool inheritHandle, uint32_t processId)"),
+  AssignProcessToJobObject: kernel32?.func("bool __stdcall AssignProcessToJobObject(void * job, void * process)"),
+  TerminateJobObject: kernel32?.func("bool __stdcall TerminateJobObject(void * job, uint32_t exitCode)"),
+  CloseHandle: kernel32?.func("bool __stdcall CloseHandle(void * handle)"),
+  GetLastError: kernel32?.func("uint32_t __stdcall GetLastError()"),
+  SetInformationJobObject: kernel32?.func("bool __stdcall SetInformationJobObject(void * job, uint32_t class_, void * info, uint32_t length)"),
+  QueryInformationJobObject: kernel32?.func("bool __stdcall QueryInformationJobObject(void * job, uint32_t class_, void * info, uint32_t length, void * returnedLength)"),
+};
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+const windowsError = (api: string, getLastError: (() => number) | undefined): string => `${api}: ${getLastError?.() ?? "unavailable"}`;
 
-function windowsLifecycle(child: ChildProcess, gracePeriodMs: number, finalWaitMs: number): LifecycleAdapter {
+function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: LifecycleAdapterOptions): LifecycleAdapter {
+  const api = { ...nativeWindowsApis, ...options.windowsApis };
   let job: unknown;
   let processHandle: unknown;
+  let closed = false;
   let setupError: string | undefined;
-  if (!child.pid || !CreateJobObjectW || !OpenProcess || !AssignProcessToJobObject || !GetLastError) setupError = "Job Object APIs unavailable";
+  if (!child.pid || !api.CreateJobObjectW || !api.OpenProcess || !api.AssignProcessToJobObject || !api.GetLastError) setupError = "WINDOWS_SETUP_UNAVAILABLE";
   else {
-    job = CreateJobObjectW(null, null);
-    if (!job) setupError = `CreateJobObjectW: ${GetLastError()}`;
+    job = api.CreateJobObjectW(null, null);
+    if (!job) setupError = windowsError("CreateJobObjectW", api.GetLastError);
     else {
-      // No BREAKAWAY_OK limit is set: Job members cannot intentionally break away through this Job.
-      // KILL_ON_JOB_CLOSE makes an unexpected runtime crash close the final handle and terminate Job members.
+      // No BREAKAWAY_OK limit is set. KILL_ON_JOB_CLOSE terminates members if our final Job handle closes.
       const limits = Buffer.alloc(144); limits.writeUInt32LE(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 16);
-      if (!SetInformationJobObject?.(job, 9, limits, limits.length)) setupError = `SetInformationJobObject(KILL_ON_JOB_CLOSE): ${GetLastError()}`;
-      processHandle = setupError ? undefined : OpenProcess(0x0101, false, child.pid);
-      if (!processHandle) setupError = `OpenProcess: ${GetLastError()}`;
-      else if (!AssignProcessToJobObject(job, processHandle)) setupError = `AssignProcessToJobObject: ${GetLastError()}`;
+      if (!api.SetInformationJobObject?.(job, 9, limits, limits.length)) setupError = windowsError("SetInformationJobObject(KILL_ON_JOB_CLOSE)", api.GetLastError);
+      processHandle = setupError ? undefined : api.OpenProcess(0x0101, false, child.pid);
+      if (!processHandle) setupError ??= windowsError("OpenProcess", api.GetLastError);
+      else if (!api.AssignProcessToJobObject(job, processHandle)) setupError = windowsError("AssignProcessToJobObject", api.GetLastError);
     }
   }
   const fallback = async (): Promise<string> => {
     if (!child.pid) return "taskkill unavailable: root PID missing";
-    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-      const taskkill = spawnChild("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const taskkill = options.spawnTaskkill ?? spawnChild;
+    return new Promise(resolve => {
+      let done = false;
+      const finish = (value: string): void => { if (!done) { done = true; resolve(value); } };
+      let process: ReturnType<typeof spawnChild>;
+      try { process = taskkill("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); }
+      catch (error) { return finish(`taskkill spawn error: ${String(error)}`); }
       let stdout = ""; let stderr = "";
-      taskkill.stdout.on("data", value => { stdout += value; }); taskkill.stderr.on("data", value => { stderr += value; });
-      taskkill.once("close", code => resolve({ code, stdout, stderr }));
-      taskkill.once("error", error => resolve({ code: null, stdout, stderr: String(error) }));
+      process.stdout?.on("data", value => { stdout += value; }); process.stderr?.on("data", value => { stderr += value; });
+      process.once("close", code => finish(`taskkill /T /F observed exit=${code}; stdout=${JSON.stringify(stdout)}; stderr=${JSON.stringify(stderr)}; exit code is diagnostic only`));
+      process.once("error", error => finish(`taskkill error: ${String(error)}`));
+      setTimeout(() => { try { process.kill(); } catch { /* best effort */ } finish("taskkill fallback timed out"); }, finalWaitMs).unref();
     });
-    return `taskkill /T /F observed exit=${result.code}; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}; exit code is diagnostic only`;
+  };
+  const accounting = async (): Promise<{ active?: number; cleanupError?: string }> => {
+    if (!job || !api.QueryInformationJobObject) return { cleanupError: "JOB_ACCOUNTING_QUERY_UNAVAILABLE" };
+    const deadline = Date.now() + finalWaitMs;
+    for (;;) {
+      const info = Buffer.alloc(48);
+      if (!api.QueryInformationJobObject(job, 1, info, info.length, null)) return { cleanupError: "JOB_ACCOUNTING_QUERY_FAILED" };
+      const active = info.readUInt32LE(40);
+      if (active === 0) return { active };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { active, cleanupError: "JOB_ACTIVE_PROCESSES_REMAIN" };
+      await wait(Math.min(25, remaining));
+    }
   };
   return {
     async terminate(reason, rootClosed) {
-      // Windows child.kill() is abrupt, not a graceful tree-stop operation; do not call it here.
-      // Job Objects have no portable graceful-stop API, so this is only a cooperative grace window.
+      // Windows has no generic graceful tree-stop request. Force immediately; do not spend a fake grace period.
       const gracefulRequested = false;
-      await Promise.race([rootClosed, wait(gracePeriodMs)]);
-      if (setupError || !job || !TerminateJobObject || !GetLastError) {
+      const rootExit = Promise.race([rootClosed.then(() => true), wait(finalWaitMs).then(() => false)]);
+      if (setupError || !job || !api.TerminateJobObject) {
         const fallbackDiagnostic = await fallback();
-        await Promise.race([rootClosed, wait(finalWaitMs)]);
-        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: setupError, diagnostics: { adapter: "windows-taskkill-fallback", containment: "unconfirmed fallback traversal; no durable containment membership", fallback: fallbackDiagnostic } };
+        const rootExited = await rootExit;
+        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: setupError ?? (rootExited ? "TASKKILL_FALLBACK_UNCONFIRMED" : "FINAL_WAIT_EXPIRED"), diagnostics: { adapter: "windows-taskkill-fallback", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable", fallback: fallbackDiagnostic } };
       }
-      if (!TerminateJobObject(job, 137)) {
-        const error = `TerminateJobObject: ${GetLastError()}`;
+      if (!api.TerminateJobObject(job, 137)) {
+        const error = windowsError("TerminateJobObject", api.GetLastError);
         const fallbackDiagnostic = await fallback();
-        await Promise.race([rootClosed, wait(finalWaitMs)]);
-        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; breakaway is disabled, but pre-assignment processes can escape", fallback: fallbackDiagnostic } };
+        await rootExit;
+        return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable", fallback: fallbackDiagnostic } };
       }
-      const rootExited = await Promise.race([rootClosed.then(() => true), wait(finalWaitMs).then(() => false)]);
-      const accounting = Buffer.alloc(48);
-      const queried = !!QueryInformationJobObject?.(job, 1, accounting, accounting.length, null);
-      const activeProcesses = queried ? accounting.readUInt32LE(40) : undefined;
-      return { reason, gracefulRequested, forceUsed: true, treeCleaned: rootExited && activeProcesses === 0, cleanupError: queried ? undefined : `QueryInformationJobObject: ${GetLastError?.() ?? "unavailable"}`, diagnostics: { adapter: "windows-job-object", containment: "members in the per-request Job Object only; breakaway is disabled, but pre-assignment processes can escape", activeProcesses } };
+      const rootExited = await rootExit;
+      const status = await accounting();
+      return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: !rootExited ? "FINAL_WAIT_EXPIRED" : status.cleanupError, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable", activeProcesses: status.active } };
     },
-    close() { if (processHandle) CloseHandle?.(processHandle); if (job) CloseHandle?.(job); },
+    close() { if (closed) return; closed = true; if (processHandle) api.CloseHandle?.(processHandle); if (job) api.CloseHandle?.(job); processHandle = undefined; job = undefined; },
   };
 }
 
-export function createLifecycleAdapter(child: ChildProcess, gracePeriodMs: number, finalWaitMs: number): LifecycleAdapter {
-  return process.platform === "win32" ? windowsLifecycle(child, gracePeriodMs, finalWaitMs) : unixLifecycle(child, gracePeriodMs, finalWaitMs);
+export function createLifecycleAdapter(child: ChildProcess, gracePeriodMs: number, finalWaitMs: number, options: LifecycleAdapterOptions = {}): LifecycleAdapter {
+  return (options.platform ?? process.platform) === "win32" ? windowsLifecycle(child, finalWaitMs, options) : unixLifecycle(child, gracePeriodMs, finalWaitMs);
 }

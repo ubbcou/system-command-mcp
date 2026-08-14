@@ -218,7 +218,7 @@ test("Command Runtime requires an absolute cwd with multiple roots", async () =>
 });
 
 test("cmd-script capability rejects cmd.exe expansion and metacharacter arguments", () => {
-  for (const unsafe of ["%PATH%", "!VAR!", "a&b", "a|b", "a<b", "a>b", "a^b"]) assert.equal(cmdScriptArgumentIsSafe(unsafe), false);
+  for (const unsafe of ["%PATH%", "!VAR!", "a&b", "a|b", "a<b", "a>b", "a^b", "line\nbreak", "line\rbreak", "nul\0byte"]) assert.equal(cmdScriptArgumentIsSafe(unsafe), false);
   for (const safe of ["space and quote", "C:\\dir with space\\tail\\", "你好🙂"]) assert.equal(cmdScriptArgumentIsSafe(safe), true);
 });
 

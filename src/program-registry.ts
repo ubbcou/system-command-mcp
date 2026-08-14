@@ -99,7 +99,7 @@ export async function inspectEnvironment(options: RegistryOptions): Promise<Envi
       });
       if (executable) {
         const kind = classifyProgram(executable);
-        programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal-argv" : "cmd-reparsed" };
+        programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal" : "cmd-reparsed" };
         break;
       }
     }

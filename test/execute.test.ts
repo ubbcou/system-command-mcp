@@ -5,7 +5,7 @@ import { execPath } from "node:process";
 import test from "node:test";
 import { executeProgram } from "../src/execute.js";
 
-const nodeProgram = { logicalName: "node", executable: execPath, declaredCandidate: "node", kind: "native" as const, argumentSemantics: "literal-argv" as const };
+const nodeProgram = { logicalName: "node", executable: execPath, declaredCandidate: "node", kind: "native" as const, argumentSemantics: "literal" as const };
 
 test("executeProgram passes arguments literally without a shell", async () => {
   const values = ["$HOME", "*.ts", "a && b", "中文 空格"];
@@ -15,7 +15,7 @@ test("executeProgram passes arguments literally without a shell", async () => {
     cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1024,
   });
   assert.equal(result.exitCode, 0);
-  assert.equal(result.termination, null);
+  assert.deepEqual(result.termination, { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } });
   assert.deepEqual(JSON.parse(result.stdout.text), values);
 });
 
@@ -40,35 +40,36 @@ function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitte
 }
 
 for (const stream of ["stdout", "stderr"] as const) {
-  test(`executeProgram rejects and kills on ${stream} errors`, async () => {
+  test(`executeProgram settles its Lifecycle Adapter before rejecting ${stream} errors`, async () => {
     const child = fakeChild();
     const result = executeProgram({
-      program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024,
+      program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, finalTerminationWaitMs: 10, maxOutputBytes: 1024,
     }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
     const error = new Error(`${stream} failure`);
     child[stream].emit("error", error);
     await assert.rejects(result, error);
-    assert.equal(child.killed, true);
+    assert.equal(child.killed, false);
   });
 }
 
-test("executeProgram rejects and kills on stdin errors", async () => {
+test("executeProgram settles its Lifecycle Adapter before rejecting stdin errors", async () => {
   const child = fakeChild();
   const result = executeProgram({
-    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, maxOutputBytes: 1024, input: "input",
+    program: nodeProgram, args: [], cwd: process.cwd(), timeoutMs: 1_000, finalTerminationWaitMs: 10, maxOutputBytes: 1024, input: "input",
   }, { spawn: (() => child as never) as unknown as NonNullable<Parameters<typeof executeProgram>[1]>["spawn"] });
   const error = new Error("stdin failure");
   child.stdin.emit("error", error);
   await assert.rejects(result, error);
-  assert.equal(child.killed, true);
+  assert.equal(child.killed, false);
 });
 
-test("Windows lifecycle documents taskkill exit status as diagnostic only", () => {
+test("Windows lifecycle documents bounded fallback and unverified containment", () => {
   const source = readFileSync(new URL("../src/lifecycle.js", import.meta.url), "utf8");
   assert.match(source, /JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE/);
   assert.match(source, /No BREAKAWAY_OK limit is set/);
   assert.match(source, /exit code is diagnostic only/);
-  assert.match(source, /child\.kill\(\) is abrupt/);
+  assert.match(source, /pre-assignment-unverifiable/);
+  assert.match(source, /Windows has no generic graceful tree-stop request/);
 });
 
 test("executeProgram reports timeouts", async () => {
@@ -78,7 +79,7 @@ test("executeProgram reports timeouts", async () => {
   });
   assert.equal(result.timedOut, true);
   assert.equal(result.termination?.reason, "timeout");
-  assert.equal(result.termination?.treeCleaned, true);
+  assert.equal(result.termination?.treeCleaned, process.platform === "win32" ? false : true);
   assert.notEqual(result.exitCode, 0);
 });
 

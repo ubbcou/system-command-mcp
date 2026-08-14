@@ -34,13 +34,13 @@ export async function createServer(options: ServerOptions): Promise<McpServer> {
   const close = server.close.bind(server);
   server.close = async () => { await closeRuntime(); await close(); };
   server.registerTool("system_environment", {
-    description: "Return the authoritative Execution Environment and Registered Programs. Program availability is already reflected in system_exec; do not probe with shell discovery commands.",
+    description: "Return the authoritative Execution Environment and Registered Programs, including argumentSemantics: literal or cmd-reparsed. Program availability is already reflected in system_exec; do not probe with shell discovery commands.",
   }, async () => {
     const value = environmentValue(await runtime.inspectEnvironment());
     return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value };
   });
   server.registerTool("system_exec", {
-    description: "Execute one Registered Program directly. Native executables receive literal arguments. Windows .cmd/.bat Platform Wrappers are cmd.exe-reparsed and reject %, !, &, |, <, >, and ^ arguments; even accepted wrapper arguments have narrower fidelity. Shell operators, pipelines, redirects, command substitution, and environment expansion are not supported.",
+    description: "Execute one Registered Program directly. Check system_environment.argumentSemantics: native programs are literal; Windows .cmd/.bat Platform Wrappers are cmd-reparsed and reject %, !, &, |, <, >, ^, CR, LF, and NUL arguments. Even accepted wrapper arguments have narrower fidelity. Shell operators, pipelines, redirects, command substitution, and environment expansion are not supported.",
     inputSchema: {
       program: programSchema.describe("Registered Logical Program name."), args: z.array(z.string()).optional().describe("Literal Argument Vector."),
       cwd: z.string().optional().describe("Single-root: relative or absolute; multi-root: authorized absolute path."),

@@ -13,7 +13,7 @@ export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: 
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult>; close(): Promise<void>; }
-export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; gracePeriodMs?: number; finalTerminationWaitMs?: number; maxOutputBytes?: number; maxConcurrentExecutions?: number; }
+export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; gracePeriodMs?: number; finalTerminationWaitMs?: number; closeDeadlineMs?: number; maxOutputBytes?: number; maxConcurrentExecutions?: number; }
 
 const MAX_TIMEOUT = 600_000;
 const MAX_CONCURRENT_EXECUTIONS = 1_024;
@@ -23,7 +23,7 @@ const MAX_ARG_TOTAL_BYTES = 256 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_TERMINATION_WAIT = 60_000;
 // cmd.exe expands %...% and may expand !...!, while these metacharacters are parser syntax.
-const UNSAFE_CMD_SCRIPT_ARGUMENT = /[%!&|<>^]/;
+const UNSAFE_CMD_SCRIPT_ARGUMENT = /[%!&|<>^\r\n\0]/;
 export const cmdScriptArgumentIsSafe = (argument: string): boolean => !UNSAFE_CMD_SCRIPT_ARGUMENT.test(argument);
 const LOGICAL_PROGRAM_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 const object = (value: unknown, path: string): Record<string, unknown> => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`INVALID_MANIFEST: ${path} must be an object`); return value as Record<string, unknown>; };
@@ -139,7 +139,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     }
     if (!executable || !declaredCandidate) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
     const kind = /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native";
-    programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal-argv" : "cmd-reparsed" }; policies[logicalName] = definition.policy ?? {};
+    programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal" : "cmd-reparsed" }; policies[logicalName] = definition.policy ?? {};
   }
   if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
   let closing = false;
@@ -169,5 +169,5 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     })();
     active.set(execution, controller);
     return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });
-  }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); closePromise = Promise.allSettled([...active.keys()]).then(() => {}); } return closePromise; } };
+  }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); const deadline = options.closeDeadlineMs ?? 15_000; closePromise = Promise.race([Promise.allSettled([...active.keys()]).then(() => {}), new Promise<void>(resolve => setTimeout(resolve, deadline))]); } return closePromise; } };
 }

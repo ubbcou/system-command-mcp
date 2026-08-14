@@ -1,5 +1,5 @@
 export type ProgramKind = "native" | "cmd-script";
-export type ArgumentSemantics = "literal-argv" | "cmd-reparsed";
+export type ArgumentSemantics = "literal" | "cmd-reparsed";
 
 export interface RegisteredProgram {
   logicalName: string;
@@ -36,7 +36,15 @@ export interface StreamOutput {
   totalBytes: number;
 }
 
-export interface TerminationOutcome {
+export interface NaturalTerminationOutcome {
+  reason: null;
+  gracefulRequested: false;
+  forceUsed: false;
+  treeCleaned: null;
+  diagnostics: { adapter: "natural" };
+}
+
+export interface ForcedTerminationOutcome {
   reason: "timeout" | "cancelled";
   gracefulRequested: boolean;
   forceUsed: boolean;
@@ -44,6 +52,8 @@ export interface TerminationOutcome {
   cleanupError?: string;
   diagnostics: Record<string, unknown>;
 }
+
+export type TerminationOutcome = NaturalTerminationOutcome | ForcedTerminationOutcome;
 
 export interface ExecuteResult {
   exitCode: number | null;

@@ -39,7 +39,7 @@ test("stdio server lists dynamic programs and executes one", async () => {
     const environment = await client.callTool({ name: "system_environment", arguments: {} });
     const registered = (environment.structuredContent as { programs: Record<string, { declaredCandidate: string; argumentSemantics: string }> }).programs.node;
     assert.equal(registered?.declaredCandidate, "node");
-    assert.equal(registered?.argumentSemantics, "literal-argv");
+    assert.equal(registered?.argumentSemantics, "literal");
 
     const result = await client.callTool({
       name: "system_exec",
