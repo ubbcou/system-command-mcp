@@ -9,9 +9,9 @@ function manifest(programs: Record<string, unknown>) {
   return {
     version: 1,
     programs,
-    platform: {
+    platforms: {
       [process.platform]: {
-        searchPaths: [execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")))],
+        searchPath: [execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")))],
       },
     },
   };
@@ -21,18 +21,18 @@ test("Program Manifest v1 rejects unknown fields and merges platform program fie
   assert.throws(() => parseProgramManifest({ version: 1, programs: {}, unexpected: true }), /unknown field/i);
   const parsed = parseProgramManifest({
     version: 1,
-    programs: { node: { candidates: ["node"], core: true, policy: { maximumTimeoutMs: 200 } } },
-    platform: { [process.platform]: { programs: { node: { policy: { defaultTimeoutMs: 100 } } } } },
+    programs: { node: { candidates: ["node"], required: true, policy: { maxTimeoutMs: 200 } } },
+    platforms: { [process.platform]: { programs: { node: { policy: { defaultTimeoutMs: 100 } } } } },
   });
   assert.deepEqual(parsed.programs.node, {
-    candidates: ["node"], core: true, policy: { maximumTimeoutMs: 200, defaultTimeoutMs: 100 }, environment: undefined,
+    candidates: ["node"], required: true, policy: { maxTimeoutMs: 200, defaultTimeoutMs: 100 }, environment: undefined,
   });
 });
 
 test("Configured Mode uses one layered execution environment for registration and spawn", async () => {
   const runtime = await createCommandRuntime({
     roots: [root],
-    manifest: manifest({ node: { candidates: ["node"], core: true, environment: { assignments: { MARKER: "configured" } } } }),
+    manifest: manifest({ node: { candidates: ["node"], required: true, environment: { set: { MARKER: "configured" } } } }),
   });
   try {
     const environment = await runtime.inspectEnvironment();
@@ -50,10 +50,10 @@ test("Configured Mode uses one layered execution environment for registration an
 
 test("Configured Mode requires Core Programs while Optional Programs may be absent", async () => {
   await assert.rejects(createCommandRuntime({
-    roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], core: true } }),
+    roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], required: true } }),
   }), /CORE_PROGRAM_UNAVAILABLE/);
   const runtime = await createCommandRuntime({
-    roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], core: false } }),
+    roots: [root], manifest: manifest({ missing: { candidates: ["definitely-missing"], required: false } }),
   });
   try {
     assert.equal((await runtime.inspectEnvironment()).programs.missing, undefined);
@@ -70,10 +70,21 @@ test("Automatic Discovery Mode remains available and process terminal states are
   } finally { await runtime.close(); }
 });
 
-test("Command Runtime authorizes multiple roots, bounded arguments, and opt-in stdin", async () => {
+test("a pre-aborted signal returns only the cancelled terminal state", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const runtime = await createCommandRuntime({ roots: [root], manifest: manifest({ node: { candidates: ["node"], required: true } }) });
+  try {
+    const result = await runtime.execute({ program: "node", args: ["-e", "setTimeout(() => {}, 1000)"], cwd: ".", timeoutMs: 30, signal: controller.signal });
+    assert.equal(result.cancelled, true);
+    assert.equal(result.timedOut, false);
+  } finally { await runtime.close(); }
+});
+
+test("Command Runtime authorizes roots, bounded arguments, and opt-in stdin", async () => {
   const runtime = await createCommandRuntime({
     roots: [root, root],
-    manifest: manifest({ node: { candidates: ["node"], core: true, policy: { allowStdin: true } } }),
+    manifest: manifest({ node: { candidates: ["node"], required: true, policy: { allowStdin: true } } }),
   });
   try {
     const result = await runtime.execute({

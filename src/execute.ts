@@ -40,6 +40,7 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
   let termination: "timeout" | "cancelled" | undefined;
 
   return new Promise<ExecuteResult>((resolve, reject) => {
+    if (request.signal?.aborted) termination = "cancelled";
     const child = spawn(request.program.executable, [...request.args], {
       cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
@@ -51,6 +52,7 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
     timer.unref();
     const onAbort = (): void => { if (!termination) { termination = "cancelled"; stop(); } };
     request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (termination === "cancelled") stop();
     child.once("error", (error) => {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onAbort);
