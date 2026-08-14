@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, relative, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
@@ -13,7 +13,7 @@ export interface ProgramManifest { version: 1; searchPath?: string[]; allowInher
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult>; close(): Promise<void>; }
-export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; maxOutputBytes?: number; }
+export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; maxOutputBytes?: number; }
 
 const MAX_TIMEOUT = 600_000;
 const MAX_ARGS = 4_096;
@@ -61,18 +61,23 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const programs = Object.fromEntries(Object.entries(object(root.programs, "manifest.programs")).map(([name, definition]) => [name, program(definition, `manifest.programs.${name}`) as ManifestProgram]));
   for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
-  const overrideRaw = platforms[platform];
-  let override: Record<string, unknown> = {};
-  if (overrideRaw !== undefined) { override = object(overrideRaw, `manifest.platforms.${platform}`); unknownFields(override, ["searchPath", "allowInheritedPath", "environment", "programs"], `manifest.platforms.${platform}`); }
-  if (override.searchPath !== undefined && (!Array.isArray(override.searchPath) || !override.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");
-  if (override.allowInheritedPath !== undefined && typeof override.allowInheritedPath !== "boolean") throw new Error("INVALID_MANIFEST: allowInheritedPath");
-  const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
-  for (const [name, item] of Object.entries(overrides)) {
-    const parsed = program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>;
-    if (!programs[name]) throw new Error(`INVALID_MANIFEST: platform program ${name} has no base definition`);
-    programs[name] = mergeProgram(programs[name], parsed);
-    if (programs[name].required && programs[name].enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
+  const platformOverrides: Record<string, Record<string, unknown>> = {};
+  for (const [name, raw] of Object.entries(platforms)) {
+    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "allowInheritedPath", "environment", "programs"], `manifest.platforms.${name}`);
+    if (item.searchPath !== undefined && (!Array.isArray(item.searchPath) || !item.searchPath.every(x => typeof x === "string"))) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.searchPath`);
+    if (item.allowInheritedPath !== undefined && typeof item.allowInheritedPath !== "boolean") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.allowInheritedPath`);
+    layer(item.environment, `manifest.platforms.${name}.environment`);
+    const overrides = item.programs === undefined ? {} : object(item.programs, `manifest.platforms.${name}.programs`);
+    for (const [programName, definition] of Object.entries(overrides)) {
+      const parsed = program(definition, `manifest.platforms.${name}.programs.${programName}`, true) as Partial<ManifestProgram>;
+      if (!programs[programName]) throw new Error(`INVALID_MANIFEST: platform program ${programName} has no base definition`);
+      if (programs[programName].required && parsed.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${programName} cannot be disabled`);
+    }
+    platformOverrides[name] = item;
   }
+  const override = platformOverrides[platform] ?? {};
+  const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
+  for (const [name, item] of Object.entries(overrides)) programs[name] = mergeProgram(programs[name]!, program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>);
   return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
 }
 
@@ -87,10 +92,11 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   const physicalRoots = [...new Set(await Promise.all(options.roots.map(root => realpath(root))))];
   const roots = physicalRoots.filter(root => !physicalRoots.some(other => other !== root && isInside(other, root)));
   const rootIdentities = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; }));
-  const input = options.environment ?? process.env;
+  const input = Object.freeze(Object.fromEntries(Object.entries(options.environment ?? process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)));
   const configured = options.manifest !== undefined;
   const manifest = configured ? parseProgramManifest(options.manifest, platform) : undefined;
-  const environment: Record<string, string> = Object.fromEntries(Object.entries(input).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  const manifestDirectory = options.manifestPath ? dirname(resolve(options.manifestPath)) : options.manifestDirectory;
+  const environment: Record<string, string> = { ...input };
   if (manifest) {
     const pathKey = platform === "win32" ? Object.keys(environment).find(key => key.toLowerCase() === "path") ?? "PATH" : "PATH";
     const paths = [...(manifest.searchPath ?? []), ...(manifest.allowInheritedPath ? [environment[pathKey] ?? ""] : [])].filter(Boolean);
@@ -103,7 +109,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   for (const [logicalName, definition] of Object.entries(definitions)) {
     if (definition.enabled === false) continue;
     const perProgramEnvironment = { ...environment }; applyLayer(perProgramEnvironment, input, definition.environment, platform);
-    const executable = await resolveExecutable(definition.candidates, { platform, path: perProgramEnvironment[platform === "win32" ? Object.keys(perProgramEnvironment).find(k => k.toLowerCase() === "path") ?? "PATH" : "PATH"], pathExt: perProgramEnvironment.PATHEXT });
+    const executable = await resolveExecutable(definition.candidates, { platform, manifestDirectory, path: perProgramEnvironment[platform === "win32" ? Object.keys(perProgramEnvironment).find(k => k.toLowerCase() === "path") ?? "PATH" : "PATH"], pathExt: perProgramEnvironment.PATHEXT });
     if (!executable) { if (definition.required) throw new Error(`REQUIRED_PROGRAM_UNAVAILABLE: ${logicalName}`); continue; }
     programs[logicalName] = { logicalName, executable, kind: /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native" }; policies[logicalName] = definition.policy ?? {};
   }

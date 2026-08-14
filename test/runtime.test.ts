@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
 import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
@@ -84,7 +84,34 @@ test("Program Manifest requires environment references by default and validates 
   assert.deepEqual(parsed.searchPath, ["platform", "base"]);
   assert.throws(() => parseProgramManifest({
     version: 1, programs: { node: { candidates: ["node"] } }, platforms: { [process.platform]: { searchPath: [1] } },
-  }), /INVALID_MANIFEST: searchPath/);
+  }), /INVALID_MANIFEST: .*searchPath/);
+});
+
+test("Program Manifest validates inactive platform definitions", () => {
+  assert.throws(() => parseProgramManifest({
+    version: 1, programs: { node: { candidates: ["node"] } }, platforms: { inactive: { searchPath: [1] } },
+  }), /manifest\.platforms\.inactive\.searchPath/);
+  assert.throws(() => parseProgramManifest({
+    version: 1, programs: { node: { candidates: ["node"] } }, platforms: { inactive: { programs: { node: { policy: { nope: true } } } } },
+  }), /unknown field/);
+});
+
+test("Command Runtime snapshots environment references", async () => {
+  const environment = { PATH: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), SECRET: "first" };
+  const runtime = await createCommandRuntime({
+    roots: [root], environment, manifest: manifest({ node: { candidates: ["node"], required: true, environment: { set: { SECRET: { fromEnvironment: "SECRET" } } } } }),
+  });
+  try {
+    environment.SECRET = "second";
+    const result = await runtime.execute({ program: "node", args: ["-e", "process.stdout.write(process.env.SECRET)"], cwd: ".", timeoutMs: 1_000 });
+    assert.equal(result.stdout.text, "first");
+  } finally { await runtime.close(); }
+});
+
+test("Command Runtime resolves manifest-relative candidates and requires their base", async () => {
+  await assert.rejects(createCommandRuntime({ roots: [root], manifest: { version: 1, programs: { node: { candidates: ["./node"] } } } }), /MANIFEST_DIRECTORY_REQUIRED/);
+  const runtime = await createCommandRuntime({ roots: [root], manifestDirectory: execPath.slice(0, Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\"))), manifest: { version: 1, programs: { node: { candidates: ["./" + execPath.slice(Math.max(execPath.lastIndexOf("/"), execPath.lastIndexOf("\\")) + 1)], required: true } } } });
+  try { assert.equal((await runtime.inspectEnvironment()).programs.node?.executable, resolve(execPath)); } finally { await runtime.close(); }
 });
 
 test("Command Runtime rejects missing required environment references", async () => {

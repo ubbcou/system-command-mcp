@@ -46,7 +46,6 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
     });
     child.stdout?.on("data", (chunk: Buffer) => stdout.append(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.append(chunk));
-    if (request.input !== undefined) child.stdin?.end(request.input, "utf8");
     const stop = (): void => { if (!child.killed) child.kill(); };
     const onAbort = (): void => claimTermination("cancelled");
     const cleanup = (): void => { clearTimeout(timer); request.signal?.removeEventListener("abort", onAbort); };
@@ -55,13 +54,18 @@ export async function executeProgram(request: ExecuteRequest): Promise<ExecuteRe
     timer.unref();
     request.signal?.addEventListener("abort", onAbort, { once: true });
     if (request.signal?.aborted) onAbort();
-    child.once("exit", () => { if (!terminalClaimed) { terminalClaimed = true; cleanup(); } });
-    child.once("error", (error) => {
+    child.once("exit", () => { if (!terminalClaimed) cleanup(); });
+    const fail = (error: Error): void => {
       if (terminalClaimed) return;
       terminalClaimed = true;
       cleanup();
       reject(error);
-    });
+    };
+    child.once("error", fail);
+    if (request.input !== undefined && child.stdin) {
+      child.stdin.once("error", fail);
+      child.stdin.end(request.input, "utf8", () => {});
+    }
     child.once("close", (exitCode, signal) => {
       if (!terminalClaimed) terminalClaimed = true;
       cleanup();

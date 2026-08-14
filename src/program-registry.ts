@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
-import { extname, isAbsolute, join } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import type { EnvironmentSnapshot, RegisteredProgram } from "./types.js";
 
 export const DEFAULT_ALIASES: Readonly<Record<string, readonly string[]>> = {
@@ -15,6 +16,7 @@ export interface RegistryOptions {
   path?: string;
   pathExt?: string;
   platform?: NodeJS.Platform;
+  manifestDirectory?: string;
 }
 
 function executableExtensions(platform: NodeJS.Platform, pathExt?: string): string[] {
@@ -38,7 +40,7 @@ async function isExecutable(path: string, platform: NodeJS.Platform): Promise<bo
 
 export async function resolveExecutable(
   candidates: readonly string[],
-  options: Pick<RegistryOptions, "path" | "pathExt" | "platform"> = {},
+  options: Pick<RegistryOptions, "path" | "pathExt" | "platform" | "manifestDirectory"> = {},
 ): Promise<string | undefined> {
   const platform = options.platform ?? process.platform;
   const pathDelimiter = platform === "win32" ? ";" : ":";
@@ -46,15 +48,19 @@ export async function resolveExecutable(
   const extensions = executableExtensions(platform, options.pathExt ?? process.env.PATHEXT);
 
   for (const candidate of candidates) {
-    if (isAbsolute(candidate) && await isExecutable(candidate, platform)) return candidate;
+    const manifestRelative = candidate.startsWith("./") || candidate.startsWith("../");
+    if (manifestRelative && !options.manifestDirectory) throw new Error("MANIFEST_DIRECTORY_REQUIRED");
+    const file = candidate.startsWith("~/") ? resolve(homedir(), candidate.slice(2)) : manifestRelative ? resolve(options.manifestDirectory!, candidate) : candidate;
+    if ((isAbsolute(file) || manifestRelative) && await isExecutable(file, platform)) return file;
+    if (isAbsolute(file) || manifestRelative) continue;
     for (const directory of directories) {
-      if (platform === "win32" && extname(candidate)) {
-        const path = join(directory, candidate);
+      if (platform === "win32" && extname(file)) {
+        const path = join(directory, file);
         if (await isExecutable(path, platform)) return path;
         continue;
       }
       for (const extension of extensions) {
-        const path = join(directory, platform === "win32" ? candidate + extension : candidate);
+        const path = join(directory, platform === "win32" ? file + extension : file);
         if (await isExecutable(path, platform)) return path;
       }
     }

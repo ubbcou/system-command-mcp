@@ -26,6 +26,12 @@ test("executeProgram keeps only the output tail", async () => {
   assert.equal(result.stdout.truncated, true);
 });
 
+test("executeProgram rejects stdin pipe errors", async () => {
+  await assert.rejects(executeProgram({
+    program: nodeProgram, args: ["-e", "process.stdin.destroy()"], cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1024, input: "x".repeat(1024 * 1024),
+  }));
+});
+
 test("executeProgram reports timeouts", async () => {
   const result = await executeProgram({
     program: nodeProgram, args: ["-e", "setTimeout(() => {}, 10_000)"],
