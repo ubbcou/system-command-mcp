@@ -34,10 +34,14 @@ export class ArtifactStore {
     if (this.closed || this.unavailable) throw new Error("ARTIFACT_UNAVAILABLE");
     const name = `.spool-${this.runtimeId}-${randomBytes(16).toString("hex")}`;
     const path = join(this.directory, name);
-    await mkdir(path, { mode: 0o700 });
-    await writeFile(join(path, "owner.json"), JSON.stringify({ runtimeId: this.runtimeId, leaseUntil: Date.now() + LOCK_STALE_MS }), { mode: 0o600 });
-    await writeFile(join(path, "stdout"), "", { mode: 0o600 });
-    await writeFile(join(path, "stderr"), "", { mode: 0o600 });
+    const staging = `${path}.new`;
+    await mkdir(staging, { mode: 0o700 });
+    try {
+      await writeFile(join(staging, "owner.json"), JSON.stringify({ runtimeId: this.runtimeId, leaseUntil: Date.now() + LOCK_STALE_MS }), { mode: 0o600 });
+      await writeFile(join(staging, "stdout"), "", { mode: 0o600 });
+      await writeFile(join(staging, "stderr"), "", { mode: 0o600 });
+      await rename(staging, path);
+    } catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
     const spool = new ArtifactSpool(path, this.maxStreamBytes, () => this.spools.delete(spool));
     this.spools.add(spool);
     return spool;
