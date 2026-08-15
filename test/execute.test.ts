@@ -27,7 +27,7 @@ test("executeProgram keeps bounded output head and tail", async () => {
     program: nodeProgram, args: ["-e", "process.stdout.write('abcdefghij')"],
     cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 4,
   });
-  assert.equal(result.stdout.text, "abij");
+  assert.match(result.stdout.text, /^ab\n\[\.\.\. 6 bytes omitted \.\.\.\]\nij$/);
   assert.equal(result.stdout.totalBytes, 10);
   assert.equal(result.stdout.truncated, true);
 });

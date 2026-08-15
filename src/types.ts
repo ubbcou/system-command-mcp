@@ -26,6 +26,7 @@ export interface ExecuteRequest {
   finalTerminationWaitMs?: number;
   signal?: AbortSignal;
   maxOutputBytes: number;
+  inlineHeadBytes?: number;
   input?: string;
   environment?: NodeJS.ProcessEnv;
   onOutput?: (stream: "stdout" | "stderr", chunk: Buffer) => void | Promise<void>;

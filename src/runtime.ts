@@ -15,7 +15,7 @@ export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: 
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult & { artifact: ArtifactStatus }>; readOutput(id: string, stream: OutputStream, offset: number, limit: number, encoding: OutputEncoding): Promise<OutputPage>; close(): Promise<void>; }
-export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; gracePeriodMs?: number; finalTerminationWaitMs?: number; closeDeadlineMs?: number; maxOutputBytes?: number; maxConcurrentExecutions?: number; artifactDirectory?: string; artifactRetentionMs?: number; artifactQuotaBytes?: number; }
+export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; gracePeriodMs?: number; finalTerminationWaitMs?: number; closeDeadlineMs?: number; maxOutputBytes?: number; inlineHeadBytes?: number; maxConcurrentExecutions?: number; artifactDirectory?: string; artifactRetentionMs?: number; artifactQuotaBytes?: number; artifactMaxStreamBytes?: number; }
 
 const MAX_TIMEOUT = 600_000;
 const MAX_CONCURRENT_EXECUTIONS = 1_024;
@@ -145,7 +145,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal" : "cmd-reparsed" }; policies[logicalName] = definition.policy ?? {};
   }
   if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
-  const artifacts = new ArtifactStore(options.artifactDirectory ?? join(tmpdir(), "system-command-mcp-artifacts"), options.artifactRetentionMs ?? 24 * 60 * 60 * 1000, options.artifactQuotaBytes ?? 1024 * 1024 * 1024);
+  const artifacts = new ArtifactStore(options.artifactDirectory ?? join(tmpdir(), "system-command-mcp-artifacts"), options.artifactRetentionMs ?? 24 * 60 * 60 * 1000, options.artifactQuotaBytes ?? 1024 * 1024 * 1024, options.artifactMaxStreamBytes ?? 100 * 1024 * 1024);
   await artifacts.start();
   let closing = false;
   let closePromise: Promise<void> | undefined;
@@ -172,12 +172,12 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spool = undefined; }
-      const result = await executeProgram({ program: definition, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });
-      const wantedArtifact = artifactPolicy === "always" || (artifactPolicy === "on-truncation" && (result.stdout.truncated || result.stderr.truncated)); let artifact: ArtifactStatus = { status: "discarded" };
+      const result = await executeProgram({ program: definition, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });
+      const wantedArtifact = artifactPolicy === "always" || (artifactPolicy === "on-truncation" && (result.stdout.truncated || result.stderr.truncated)); let artifact: ArtifactStatus = artifactPolicy === "never" ? { status: "not-requested" } : { status: "discarded" };
       if (wantedArtifact) { if (!spool || spool.failed) artifact = { status: "unavailable" }; else try { artifact = { status: "published", id: await artifacts.publish(spool) }; spool = undefined; } catch { artifact = { status: "unavailable" }; } }
       await artifacts.discard(spool); return { ...result, artifact };
     })();
     active.set(execution, controller);
     return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });
-  }, readOutput(id, stream, offset, limit, encoding) { if (closing) return Promise.reject(new Error("RUNTIME_CLOSING")); return artifacts.read(id, stream, offset, limit, encoding); }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); const deadline = options.closeDeadlineMs ?? 15_000; let timer: NodeJS.Timeout | undefined; const settled = Promise.allSettled([...active.keys()]).then(() => {}); const expires = new Promise<void>(resolve => { timer = setTimeout(resolve, deadline); timer.unref(); }); closePromise = Promise.race([settled, expires]).finally(() => { if (timer) clearTimeout(timer); }); } return closePromise; } };
+  }, readOutput(id, stream, offset, limit, encoding) { if (closing) return Promise.reject(new Error("RUNTIME_CLOSING")); return artifacts.read(id, stream, offset, limit, encoding); }, close() { if (!closePromise) { closing = true; for (const controller of active.values()) controller.abort(); const deadline = options.closeDeadlineMs ?? 15_000; let timer: NodeJS.Timeout | undefined; const settled = Promise.allSettled([...active.keys()]).then(() => {}); const expires = new Promise<void>(resolve => { timer = setTimeout(resolve, deadline); timer.unref(); }); closePromise = Promise.race([settled, expires]).finally(async () => { if (timer) clearTimeout(timer); await artifacts.close(); }); } return closePromise; } };
 }
