@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
-import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
+import { cmdScriptArgumentIsSafe, createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
 
 const root = process.cwd();
 
@@ -30,6 +30,12 @@ test("Program Manifest v1 rejects unknown fields and merges platform program fie
   assert.deepEqual(parsed.programs.node, {
     candidates: ["node"], required: true, policy: { maxTimeoutMs: 200, defaultTimeoutMs: 100 }, environment: undefined,
   });
+});
+
+test("Program Manifest accepts bounded lifecycle policy", () => {
+  const parsed = parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"], policy: { gracePeriodMs: 10, finalTerminationWaitMs: 20 } } } });
+  assert.equal(parsed.programs.node?.policy?.gracePeriodMs, 10);
+  assert.throws(() => parseProgramManifest({ version: 1, programs: { node: { candidates: ["node"], policy: { gracePeriodMs: 0 } } } }), /gracePeriodMs/);
 });
 
 test("Configured Mode uses one layered execution environment for registration and spawn", async () => {
@@ -197,6 +203,7 @@ test("a pre-aborted signal returns only the cancelled terminal state", async () 
     const result = await runtime.execute({ program: "node", args: ["-e", "setTimeout(() => {}, 1000)"], cwd: ".", timeoutMs: 30, signal: controller.signal });
     assert.equal(result.cancelled, true);
     assert.equal(result.timedOut, false);
+    assert.equal(result.termination?.reason, "cancelled");
   } finally { await runtime.close(); }
 });
 
@@ -208,6 +215,11 @@ test("Command Runtime requires an absolute cwd with multiple roots", async () =>
     await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /CWD_NOT_ALLOWED/);
     assert.equal((await runtime.execute({ program: "node", args: ["--version"], cwd: root, timeoutMs: 1_000 })).exitCode, 0);
   } finally { await runtime.close(); await rm(secondRoot, { recursive: true }); }
+});
+
+test("cmd-script capability rejects cmd.exe expansion and metacharacter arguments", () => {
+  for (const unsafe of ["%PATH%", "!VAR!", "a&b", "a|b", "a<b", "a>b", "a^b", "line\nbreak", "line\rbreak", "nul\0byte"]) assert.equal(cmdScriptArgumentIsSafe(unsafe), false);
+  for (const safe of ["space and quote", "C:\\dir with space\\tail\\", "你好🙂"]) assert.equal(cmdScriptArgumentIsSafe(safe), true);
 });
 
 test("Command Runtime authorizes roots, bounded arguments, and opt-in stdin", async () => {
@@ -232,6 +244,13 @@ test("Command Runtime bounds concurrency and close cancels active executions", a
   assert.equal((await running).cancelled, true);
   await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: ".", timeoutMs: 1_000 }), /RUNTIME_CLOSING/);
   await runtime.close();
+});
+
+test("Command Runtime close deadline does not keep a standalone event loop alive", async () => {
+  const runtime = await createCommandRuntime({ roots: [root], closeDeadlineMs: 10_000 });
+  const started = Date.now();
+  await runtime.close();
+  assert.ok(Date.now() - started < 100);
 });
 
 test("Command Runtime snapshots inspection and manifest ownership", async () => {

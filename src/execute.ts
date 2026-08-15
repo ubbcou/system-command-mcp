@@ -1,101 +1,29 @@
 import spawn from "cross-spawn";
-import type { ExecuteRequest, ExecuteResult, StreamOutput } from "./types.js";
+import { createLifecycleAdapter } from "./lifecycle.js";
+import type { ExecuteRequest, ExecuteResult, StreamOutput, ForcedTerminationOutcome, TerminationOutcome } from "./types.js";
 
-class TailBuffer {
-  private chunks: Buffer[] = [];
-  private retainedBytes = 0;
-  private totalBytes = 0;
-  constructor(private readonly limit: number) {}
-
-  append(chunk: Buffer): void {
-    this.totalBytes += chunk.length;
-    this.chunks.push(chunk);
-    this.retainedBytes += chunk.length;
-    while (this.retainedBytes > this.limit && this.chunks.length > 0) {
-      const overflow = this.retainedBytes - this.limit;
-      const first = this.chunks[0];
-      if (!first) break;
-      if (first.length <= overflow) {
-        this.chunks.shift();
-        this.retainedBytes -= first.length;
-      } else {
-        this.chunks[0] = first.subarray(overflow);
-        this.retainedBytes -= overflow;
-      }
-    }
-  }
-
-  result(): StreamOutput {
-    return {
-      text: Buffer.concat(this.chunks).toString("utf8"),
-      truncated: this.totalBytes > this.retainedBytes,
-      totalBytes: this.totalBytes,
-    };
-  }
+class InlineBuffer {
+  private head: Buffer[] = []; private tail: Buffer[] = []; private headBytes = 0; private tailBytes = 0; private totalBytes = 0; private invalidUtf8 = false; private readonly utf8 = new TextDecoder("utf-8", { fatal: true });
+  constructor(private readonly limit: number, private readonly headLimit: number) {}
+  append(chunk: Buffer): void { this.totalBytes += chunk.length; try { this.utf8.decode(chunk, { stream: true }); } catch { this.invalidUtf8 = true; } if (this.headBytes < this.headLimit) { const part = chunk.subarray(0, this.headLimit - this.headBytes); this.head.push(part); this.headBytes += part.length; chunk = chunk.subarray(part.length); } if (chunk.length) { this.tail.push(chunk); this.tailBytes += chunk.length; const tailLimit = this.limit - this.headLimit; while (this.tailBytes > tailLimit) { const first = this.tail[0]!; const excess = this.tailBytes - tailLimit; if (first.length <= excess) { this.tail.shift(); this.tailBytes -= first.length; } else { this.tail[0] = first.subarray(excess); this.tailBytes -= excess; } } } }
+  result(): StreamOutput { try { this.utf8.decode(); } catch { this.invalidUtf8 = true; } const truncated = this.totalBytes > this.limit; let head = Buffer.concat(this.head); let tail = Buffer.concat(this.tail); if (truncated && !this.invalidUtf8) { while (head.length && !isUtf8(head)) head = head.subarray(0, head.length - 1); while (tail.length && (tail[0]! & 0xc0) === 0x80) tail = tail.subarray(1); } const bytes = Buffer.concat([head, tail]); const omittedBytes = truncated ? this.totalBytes - bytes.length : 0; const decode = (part: Buffer): { text: string; lossy: boolean } => { try { return { text: new TextDecoder("utf-8", { fatal: true }).decode(part), lossy: false }; } catch { return { text: part.toString("utf8"), lossy: true }; } }; const displayed = truncated ? [decode(head), decode(tail)] : [decode(bytes)]; const lossyUtf8 = this.invalidUtf8 || displayed.some(part => part.lossy); const text = truncated ? `${displayed[0]!.text}\n[... ${omittedBytes} bytes omitted ...]\n${displayed[1]!.text}` : displayed[0]!.text; return { text, truncated, totalBytes: this.totalBytes, omittedBytes, lossyUtf8 }; }
 }
 
-export async function executeProgram(request: ExecuteRequest, options: { spawn?: typeof spawn } = {}): Promise<ExecuteResult> {
-  const spawnProcess = options.spawn ?? spawn;
-  const stdout = new TailBuffer(request.maxOutputBytes);
-  const stderr = new TailBuffer(request.maxOutputBytes);
-  let termination: "timeout" | "cancelled" | undefined;
-  let terminalClaimed = false;
-  let settled = false;
+function isUtf8(bytes: Buffer): boolean { try { new TextDecoder("utf-8", { fatal: true }).decode(bytes); return true; } catch { return false; } }
 
+export async function executeProgram(request: ExecuteRequest, options: { spawn?: typeof spawn } = {}): Promise<ExecuteResult> {
+  const spawnProcess = options.spawn ?? spawn; const headBytes = Math.min(request.inlineHeadBytes ?? (request.maxOutputBytes >= 1024 * 1024 ? 256 * 1024 : Math.ceil(request.maxOutputBytes / 2)), request.maxOutputBytes); const stdout = new InlineBuffer(request.maxOutputBytes, headBytes); const stderr = new InlineBuffer(request.maxOutputBytes, headBytes); let reason: "timeout" | "cancelled" | undefined; let settled = false; const writes: Record<"stdout" | "stderr", Promise<void>> = { stdout: Promise.resolve(), stderr: Promise.resolve() }; let persistenceFailed = false;
   return new Promise<ExecuteResult>((resolve, reject) => {
-    const child = spawnProcess(request.program.executable, [...request.args], {
-      cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-    });
-    const onStdoutData = (chunk: Buffer): void => stdout.append(chunk);
-    const onStderrData = (chunk: Buffer): void => stderr.append(chunk);
-    child.stdout?.on("data", onStdoutData);
-    child.stderr?.on("data", onStderrData);
-    let exited = false;
-    const stop = (): void => { if (!exited && !child.killed) child.kill(); };
-    const onAbort = (): void => claimTermination("cancelled");
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      request.signal?.removeEventListener("abort", onAbort);
-    };
-    const settleCleanup = (): void => {
-      cleanup();
-      child.stdout?.removeListener("data", onStdoutData);
-      child.stderr?.removeListener("data", onStderrData);
-    };
-    const claimTermination = (reason: "timeout" | "cancelled"): void => { if (!terminalClaimed) { terminalClaimed = true; termination = reason; stop(); } };
-    const internalFailure = (error: Error): void => {
-      if (settled) return;
-      terminalClaimed = true;
-      settleCleanup();
-      stop();
-      settled = true;
-      reject(error);
-    };
-    const timer = setTimeout(() => claimTermination("timeout"), request.timeoutMs);
-    timer.unref();
-    request.signal?.addEventListener("abort", onAbort, { once: true });
-    if (request.signal?.aborted) onAbort();
-    child.once("exit", () => {
-      exited = true;
-      if (!terminalClaimed) {
-        terminalClaimed = true;
-        cleanup();
-      }
-    });
-    child.on("error", internalFailure);
-    child.stdout?.on("error", internalFailure);
-    child.stderr?.on("error", internalFailure);
-    if (request.input !== undefined && child.stdin) {
-      child.stdin.on("error", internalFailure);
-      child.stdin.end(request.input, "utf8", () => {});
-    }
-    child.once("close", (exitCode, signal) => {
-      if (!settled) {
-        terminalClaimed = true;
-        settled = true;
-        settleCleanup();
-        resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: termination === "timeout", cancelled: termination === "cancelled" });
-      }
-    });
+    const child = spawnProcess(request.program.executable, [...request.args], { cwd: request.cwd, env: request.environment, shell: false, windowsHide: true, detached: process.platform !== "win32", stdio: [request.input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    const adapter = createLifecycleAdapter(child, request.gracePeriodMs ?? 2_000, request.finalTerminationWaitMs ?? 5_000); let exited = false; let termination: Promise<ForcedTerminationOutcome> | undefined; let terminationOutcome: ForcedTerminationOutcome | undefined; let resolveRootExit!: () => void; const rootClosed = new Promise<void>(resolveRoot => { resolveRootExit = resolveRoot; });
+    const receive = (stream: "stdout" | "stderr", target: InlineBuffer) => (chunk: Buffer): void => { target.append(chunk); if (request.onOutput && !persistenceFailed) writes[stream] = writes[stream].then(() => request.onOutput!(stream, chunk)).catch(() => { persistenceFailed = true; }); };
+    const onStdoutData = receive("stdout", stdout); const onStderrData = receive("stderr", stderr);
+    child.stdout?.on("data", onStdoutData); child.stderr?.on("data", onStderrData);
+    const cleanup = (): void => { clearTimeout(timer); request.signal?.removeEventListener("abort", onAbort); child.stdout?.removeListener("data", onStdoutData); child.stderr?.removeListener("data", onStderrData); adapter.close(); };
+    const settleRejected = (error: Error): void => { if (settled) return; settled = true; cleanup(); reject(error); };
+    const internalFailure = (error: Error): void => { if (!child.pid) return settleRejected(error); reason ??= "cancelled"; termination ??= adapter.terminate(reason, rootClosed); void termination.then(outcome => { terminationOutcome = outcome; }, () => {}); void termination.finally(() => settleRejected(error)); };
+    const claimTermination = (claimed: "timeout" | "cancelled"): void => { if (reason || exited || settled) return; reason = claimed; termination = adapter.terminate(claimed, rootClosed); void termination.then(outcome => { terminationOutcome = outcome; }, error => { void settleRejected(error instanceof Error ? error : new Error(String(error))); }); };
+    const onAbort = (): void => claimTermination("cancelled"); const timer = setTimeout(() => claimTermination("timeout"), request.timeoutMs); timer.unref(); request.signal?.addEventListener("abort", onAbort, { once: true }); if (request.signal?.aborted) onAbort(); child.once("exit", () => { exited = true; resolveRootExit(); }); child.on("error", internalFailure); child.stdout?.on("error", internalFailure); child.stderr?.on("error", internalFailure); if (request.input !== undefined && child.stdin) { child.stdin.on("error", internalFailure); child.stdin.end(request.input, "utf8", () => {}); }
+    child.once("close", (exitCode, signal) => { if (settled) return; void (async () => { try { const outcome: TerminationOutcome = terminationOutcome ?? (termination ? await termination : await adapter.naturalClose() ?? { reason: null, gracefulRequested: false, forceUsed: false, treeCleaned: null, diagnostics: { adapter: "natural" } }); await Promise.all(Object.values(writes)); if (settled) return; settled = true; cleanup(); resolve({ exitCode, signal, stdout: stdout.result(), stderr: stderr.result(), timedOut: reason === "timeout", cancelled: reason === "cancelled", termination: outcome }); } catch (error) { settleRejected(error instanceof Error ? error : new Error(String(error))); } })(); });
   });
 }
