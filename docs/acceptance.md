@@ -38,7 +38,7 @@ CI does not run Codex. To record a configured local observation, arrange a serve
 CODEX_ACCEPTANCE_FULL=1 npm run acceptance:codex-real-host
 ```
 
-The script parses `codex mcp list/get --json`, then parses every `codex exec --json` JSONL event. Full mode requires exactly five completed, error-free calls on server `system-command`: `system_environment`, three `system_exec` calls (success, exit 7, timeout), and `system_output`. It asserts configured environment, exit/timeout states with `isError: false` at the MCP-call level, published artifacts, and a nonempty bounded output page. It emits only redacted normalized JSON: no paths, command arguments, artifact IDs, tokens, or raw output.
+The script parses `codex mcp list/get --json`, then parses every `codex exec --json` MCP call lifecycle event by item id. Full mode requires exactly five unique, started-and-completed, error-free calls on only server `system-command`: `system_environment`, three `system_exec` calls (success, exit 7, timeout), and `system_output`; it rejects additional, failed, or incomplete calls. It asserts configured environment with exactly `node`, exit/timeout states with canonical `completedWithoutError: true`, published artifacts, and a nonempty bounded output page. It emits only redacted normalized JSON: no paths, command arguments, artifact IDs, tokens, or raw output.
 
 Evidence records `git write-tree` as `testedTree` before staging the evidence record, and current `HEAD` as `headParent`. The tree hash identifies the tested staged content; `headParent` identifies the evidence-record commit's parent. [`acceptance-windows-x64.json`](acceptance-windows-x64.json) is one local observation, not a CI or cross-host claim.
 
