@@ -24,3 +24,18 @@ jobs:
       - run: node -e "if (process.platform === 'darwin') console.log('macOS architecture:', process.arch)"
       - run: npm ci
       - run: npm test
+      - name: Run DSH-independent runtime portable acceptance
+        run: npm run acceptance:runtime-portable
+      # DSH 0.1.0-rc.6 uses Promise.withResolvers; this host test is Node 22-only.
+      # This does not narrow system-command-mcp's Node >=20 support or core test matrix.
+      - name: Install pinned DSH acceptance runtime
+        if: matrix.node == 22
+        run: npm ci --prefix acceptance/dsh
+      - name: Run portable DSH acceptance
+        if: matrix.node == 22
+        run: npm run acceptance:portable
+      - name: Run DSH direct and reconnect acceptance
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          npm run acceptance:dsh
+          npm run acceptance:dsh-reconnect

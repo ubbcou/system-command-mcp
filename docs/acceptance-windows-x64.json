@@ -1,0 +1,42 @@
+{
+  "evidenceSource": "credentialed-local-real-codex",
+  "testedTree": "872b50da71349bfab4e8607af9ee53909f2613a1",
+  "headParent": "62d08bde7970cd24ad391a5b10b84665010c1dd7",
+  "commands": [
+    "npm test",
+    "npm run acceptance:runtime-portable",
+    "npm run acceptance:portable",
+    "npm run acceptance:dsh-reconnect",
+    "codex --version",
+    "codex mcp list --json",
+    "codex mcp get system-command --json",
+    "codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <environment-and-execution-scenarios>"
+  ],
+  "codex": {
+    "version": "codex-cli 0.147.0",
+    "registration": { "listed": true, "systemCommand": true },
+    "fullAcceptance": true
+  },
+  "dsh": {
+    "version": "0.1.0-rc.6",
+    "tools": [
+      "mcp__system-command__system_environment",
+      "mcp__system-command__system_exec",
+      "mcp__system-command__system_output"
+    ],
+    "reconnect": { "pidChanged": true, "disposedToolsEmpty": true }
+  },
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "mode": "configured",
+    "programNames": ["node"]
+  },
+  "executions": {
+    "success": { "completedWithoutError": true, "exitCode": 0, "timedOut": false, "artifactPublished": true },
+    "nonzero": { "completedWithoutError": true, "exitCode": 7, "timedOut": false, "artifactPublished": true },
+    "timeout": { "completedWithoutError": true, "timedOut": true, "artifactPublished": true },
+    "outputPage": { "completedWithoutError": true, "markerPrefixRead": true }
+  },
+  "claim": "This credentialed local observation is not CI transport/runtime acceptance and makes no cross-host claim. testedTree identifies the exact staged content before the evidence-record commit."
+}

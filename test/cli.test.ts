@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile, chmod } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -116,20 +116,28 @@ test("doctor shadows use the program's effective environment layer", async () =>
     for (const directory of [first, second]) { const file = join(directory, filename); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o755); }
     await writeFile(path, JSON.stringify({ version: 1, environment: { set: { PATH: first } }, programs: { tool: { candidates: [filename], environment: { set: { PATH: `${second}${delimiter}${first}` } } } } }));
     const result = await doctor({ manifestPath: path, roots: [first] });
-    assert.ok(result.message.includes(`tool: winner ${join(second, filename)}`));
-    assert.ok(result.message.includes(`shadowed ${join(first, filename)}`));
+    assert.ok(result.message.includes(`tool: winner ${await realpath(join(second, filename))}`));
+    assert.ok(result.message.includes(`shadowed ${await realpath(join(first, filename))}`));
   } finally { await rm(first, { recursive: true, force: true }); await rm(second, { recursive: true, force: true }); }
 });
 
-test("configuration snippets preserve every serve execution option", () => {
-  const options = { roots: ["C:\\work dir\\quoted\\\"root", "C:\\second root"], manifestPath: "C:\\configs\\manifest.json", artifactDirectory: "C:\\artifacts", artifactRetentionMs: 1, artifactQuotaBytes: 2, artifactMaxStreamBytes: 3, maxOutputBytes: 5, inlineHeadBytes: 5, defaultTimeoutMs: 6, maxConcurrentExecutions: 4 };
-  const parsed = parseCli((JSON.parse(`[${codexSnippet(options).match(/args = \[(.*)\]/)![1]}]`) as string[]).slice(1));
-  assert.deepEqual(parsed.options, { ...options, roots: options.roots.map(root => join(root)), manifestPath: join(options.manifestPath), artifactDirectory: join(options.artifactDirectory) });
-  const dshArgs = [...dshSnippet(options).matchAll(/^      - (".*")$/gm)].map(match => JSON.parse(match[1]!));
-  assert.deepEqual(parseCli(dshArgs.slice(1)).options, parsed.options);
-  const previous = process.env.CODEX_HOME; process.env.CODEX_HOME = "C:\\custom-codex-home";
-  try { const codex = codexSnippet(options); assert.match(codex, /\$CODEX_HOME\/config\.toml/); assert.match(codex, /effective: C:\\custom-codex-home\//); assert.match(codex, /startup_timeout_sec = 30/); assert.match(codex, /tool_timeout_sec = 300/); } finally { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous; }
-  const dsh = dshSnippet(options); assert.match(dsh, /^- id: system-command/m); assert.match(dsh, /name: "@deepseek-ai\/dsh-mcp-client"/); assert.match(dsh, /toolCallTimeoutMs: 30000/); assert.doesNotMatch(dsh, /mcpServers:|reconnect: true/);
+test("configuration snippets round-trip native absolute paths", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-config-"));
+  const options = { roots: [directory, join(directory, "second root")], manifestPath: join(directory, "manifest.json"), artifactDirectory: join(directory, "artifacts"), artifactRetentionMs: 1, artifactQuotaBytes: 2, artifactMaxStreamBytes: 3, maxOutputBytes: 5, inlineHeadBytes: 5, defaultTimeoutMs: 6, maxConcurrentExecutions: 4 };
+  try {
+    const parsed = parseCli((JSON.parse(`[${codexSnippet(options).match(/args = \[(.*)\]/)![1]}]`) as string[]).slice(1));
+    assert.deepEqual(parsed.options, options);
+    const dshArgs = [...dshSnippet(options).matchAll(/^      - (".*")$/gm)].map(match => JSON.parse(match[1]!));
+    assert.deepEqual(parseCli(dshArgs.slice(1)).options, options);
+    const previous = process.env.CODEX_HOME; process.env.CODEX_HOME = join(directory, "codex-home");
+    try { const codex = codexSnippet(options); assert.match(codex, /\$CODEX_HOME\/config\.toml/); assert.match(codex, /startup_timeout_sec = 30/); assert.match(codex, /tool_timeout_sec = 300/); } finally { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous; }
+    const dsh = dshSnippet(options); assert.match(dsh, /^- id: system-command/m); assert.match(dsh, /name: "@deepseek-ai\/dsh-mcp-client"/); assert.match(dsh, /toolCallTimeoutMs: 30000/); assert.doesNotMatch(dsh, /mcpServers:|reconnect: true/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("DSH snippet JSON-escapes Windows paths", () => {
+  const dsh = dshSnippet({ roots: ["C:\\work dir\\quoted\\\"root"] });
+  assert.match(dsh, /C:\\\\work dir\\\\quoted\\\\\\"root/);
 });
 
 test("print-config uses stdout and management logs use stderr", () => { const result = run(["print-config", "dsh", "--root", process.cwd()]); assert.equal(result.status, 0); assert.match(result.stdout, /^- id: system-command\n/); assert.equal(result.stderr, ""); });
