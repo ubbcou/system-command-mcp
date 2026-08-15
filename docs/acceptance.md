@@ -1,40 +1,46 @@
 # Acceptance
 
-This document separates deterministic transport/runtime acceptance from credentialed local real-host evidence. Neither category alone makes a cross-host claim.
+This document separates deterministic system-command acceptance from credentialed local Codex evidence. Neither category alone makes a cross-host claim.
 
 ## Deterministic CI acceptance
 
-`npm test` runs in the existing Node 20/22 × Windows/macOS/Linux matrix. Every matrix entry then installs the pinned DSH runtime without changing the lockfile and runs portable acceptance; Ubuntu Node 22 additionally runs the standalone smoke and reconnect checks:
+`npm test` remains the Node 20/22 × Windows/macOS/Linux core matrix. Every cell also runs the DSH-independent runtime check:
 
 ```text
-npm install --no-save --package-lock=false @deepseek-ai/dsh@0.1.0-rc.6
+npm run acceptance:runtime-portable
+```
+
+DSH `0.1.0-rc.6` is installed reproducibly from the tracked exact dependency graph:
+
+```text
+npm ci --prefix acceptance/dsh
+```
+
+Its host tests run only on Node 22. rc.6 uses `Promise.withResolvers`, so this is a DSH host-test constraint, **not** a change to system-command-mcp's Node `>=20` support. Node 22 matrix cells run:
+
+```text
 npm run acceptance:portable
-npm run acceptance:dsh-reconnect
 ```
 
-`acceptance:portable` creates a native-temp Root, Artifact directory, and Manifest. The Manifest registers only `node` at `process.execPath`, requires it, sets `artifactPolicy: "always"`, and bounds its timeout. It runs `doctor`, then the DSH MCP smoke. The smoke executes the exact registered tools: `system_environment`; successful `system_exec`; nonzero `system_exec` (exit 7); timed-out `system_exec`; and a bounded `system_output` Artifact read. It asserts structured, non-tool-error canonical fields and prints redacted normalized JSON: platform, arch, mode, program names, terminal state, output accounting, Artifact published boolean, and bounded page data—never paths or opaque IDs.
+Ubuntu Node 22 additionally runs `acceptance:dsh` and `acceptance:dsh-reconnect`. `acceptance:portable` creates a temporary Root, Artifact directory, and Manifest with only `node`, `artifactPolicy: "always"`, and bounded timeouts. The DSH smoke invokes the exact environment, execution, and artifact-output MCP tools for success, exit 7, timeout, and a bounded output read. It emits normalized output without paths or opaque IDs.
 
-`acceptance:dsh` is independently usable: absent `SYSTEM_COMMAND_MANIFEST`, it creates the same temporary manifest/root/artifact directory itself. To use a supplied configuration, pass native absolute paths:
+`DSH_CHECKOUT` may identify `acceptance/dsh`, another checkout/npx root with `node_modules`, or a locally resolvable DSH installation:
 
 ```text
-DSH_CHECKOUT=/path/to/dsh npm run acceptance:dsh
-SYSTEM_COMMAND_MANIFEST=/absolute/manifest.json SYSTEM_COMMAND_ROOT=/absolute/root SYSTEM_COMMAND_ARTIFACT_DIR=/absolute/artifacts npm run acceptance:dsh
-DSH_CHECKOUT=/path/to/dsh npm run acceptance:dsh-reconnect
+DSH_CHECKOUT=acceptance/dsh npm run acceptance:dsh
 ```
-
-The DSH scripts need `DSH_CHECKOUT` pointing at a checkout/npx root containing DSH packages, or a resolvable `dsh` executable with those packages.
 
 ## Credentialed local real Codex evidence
 
-CI does **not** run real Codex: it has no credential/configuration assumption. [`acceptance-windows-x64.json`](acceptance-windows-x64.json) records a redacted local observation tied to the tested commit, command list, Codex/DSH versions, registration checks, completed tool-call boolean, and normalized configured environment. It intentionally excludes paths, users, credentials, process IDs, command arguments, and Artifact IDs.
-
-Reproduce registration only without changing Codex configuration:
+CI does not run Codex. To record a configured local observation, arrange a server manifest with the intended policy (the acceptance run requires `artifactPolicy: "always"`) and run:
 
 ```text
-GIT_COMMIT_TESTED=$(git rev-parse HEAD) npm run acceptance:codex-real-host
+CODEX_ACCEPTANCE_FULL=1 npm run acceptance:codex-real-host
 ```
 
-The script checks `codex --version`, `codex mcp list --json`, and `codex mcp get system-command --json`. It only attempts `codex exec` when the operator has explicitly arranged credential/configuration and sets `CODEX_ACCEPTANCE=1`; it never mutates Codex configuration. Record the resulting structured JSON only as local real-host evidence.
+The script parses `codex mcp list/get --json`, then parses every `codex exec --json` JSONL event. Full mode requires exactly five completed, error-free calls on server `system-command`: `system_environment`, three `system_exec` calls (success, exit 7, timeout), and `system_output`. It asserts configured environment, exit/timeout states with `isError: false` at the MCP-call level, published artifacts, and a nonempty bounded output page. It emits only redacted normalized JSON: no paths, command arguments, artifact IDs, tokens, or raw output.
+
+Evidence records `git write-tree` as `testedTree` before staging the evidence record, and current `HEAD` as `headParent`. The tree hash identifies the tested staged content; `headParent` identifies the evidence-record commit's parent. [`acceptance-windows-x64.json`](acceptance-windows-x64.json) is one local observation, not a CI or cross-host claim.
 
 ## Package audit
 
@@ -42,14 +48,15 @@ The script checks `codex --version`, `codex mcp list --json`, and `codex mcp get
 npm pack --dry-run
 ```
 
-The package publishes only declared runtime/docs/schema files; integration scripts and local evidence remain excluded.
+The package allow-list excludes `scripts/`, `acceptance/`, and local evidence.
 
 ## Status
 
 | Target | Status | Basis |
 |---|---|---|
-| CI OS/Node matrix | Deterministic DSH portable transport/runtime acceptance | Pinned rc.6 portable smoke after unit tests; Ubuntu Node 22 also runs standalone smoke and reconnect. |
-| Windows x64 | Credentialed local real-host observation | Redacted structured evidence, not a cross-host claim. |
-| macOS/Linux real Codex | Not accepted here | Run the same local reproduction on that host. |
+| Node 20/22 × Windows/macOS/Linux | Core tests and runtime portable check | `npm test` plus DSH-independent `acceptance:runtime-portable`. |
+| Node 22 × Windows/macOS/Linux | DSH portable host acceptance | Exact locked DSH rc.6 runtime. |
+| Ubuntu Node 22 | DSH direct/reconnect acceptance | Exact locked DSH rc.6 runtime. |
+| Windows x64 | Credentialed local Codex observation | Parsed and redacted real-host evidence only. |
 
 No `npm publish` or GitHub Release is performed here.

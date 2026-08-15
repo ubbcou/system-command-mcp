@@ -14,6 +14,7 @@
     "AGENTS.md",
     "DSH.md",
     "!scripts",
+    "!acceptance",
     "!docs/acceptance-windows-x64.json",
     "system-command-manifest.schema.json",
     "system-command-manifest.example.json"
@@ -22,6 +23,7 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "test": "npm run build && node scripts/test.mjs",
+    "acceptance:runtime-portable": "npm run build && node scripts/integration/acceptance-runtime-portable.mjs",
     "acceptance:portable": "npm run build && node scripts/integration/acceptance-portable.mjs",
     "acceptance:dsh": "node scripts/integration/dsh-mcp-smoke.mjs",
     "acceptance:dsh-reconnect": "node scripts/integration/dsh-mcp-reconnect-smoke.mjs",

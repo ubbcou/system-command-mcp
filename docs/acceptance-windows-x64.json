@@ -1,18 +1,21 @@
 {
-  "evidenceSource": "credentialed-local-real-host",
-  "gitCommitTested": "209e919",
-  "gitCommitSource": "integration/host-acceptance HEAD when evidence was recorded",
+  "evidenceSource": "credentialed-local-real-codex",
+  "testedTree": "5c885d7e3ef29c583d498433dccf728a69af5d0d",
+  "headParent": "f17f06f5e62703a5ac3e55c265de84c29d87f649",
   "commands": [
     "npm test",
+    "npm run acceptance:runtime-portable",
     "npm run acceptance:portable",
-    "DSH_CHECKOUT=<dsh checkout> npm run acceptance:dsh-reconnect",
+    "npm run acceptance:dsh-reconnect",
+    "codex --version",
     "codex mcp list --json",
-    "codex mcp get system-command --json"
+    "codex mcp get system-command --json",
+    "codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <environment-and-execution-scenarios>"
   ],
   "codex": {
     "version": "codex-cli 0.147.0",
     "registration": { "listed": true, "systemCommand": true },
-    "toolCallCompleted": true
+    "fullAcceptance": true
   },
   "dsh": {
     "version": "0.1.0-rc.6",
@@ -29,5 +32,11 @@
     "mode": "configured",
     "programNames": ["node"]
   },
-  "claim": "This credentialed local observation is not CI transport/runtime acceptance and makes no cross-host claim."
+  "executions": {
+    "success": { "isError": false, "exitCode": 0, "timedOut": false, "artifactPublished": true },
+    "nonzero": { "isError": false, "exitCode": 7, "timedOut": false, "artifactPublished": true },
+    "timeout": { "isError": false, "timedOut": true, "artifactPublished": true },
+    "outputPage": { "isError": false, "markerPrefixRead": true }
+  },
+  "claim": "This credentialed local observation is not CI transport/runtime acceptance and makes no cross-host claim. testedTree identifies the exact staged content before the evidence-record commit."
 }

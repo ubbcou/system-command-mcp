@@ -5,7 +5,8 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
-const usage = "SKIP: DSH unavailable. Set DSH_CHECKOUT to a checkout or npx root containing node_modules/@deepseek-ai/dsh-mcp-client.";
+const defaultCheckout = new URL("../../acceptance/dsh", import.meta.url);
+const usage = "SKIP: DSH unavailable. Run npm ci --prefix acceptance/dsh, set DSH_CHECKOUT to that directory/a checkout, or install DSH locally.";
 
 function modulesAt(root) {
   const modules = join(root, "node_modules");
@@ -13,11 +14,10 @@ function modulesAt(root) {
 }
 
 export function dshModules() {
-  if (process.env.DSH_CHECKOUT) {
-    const modules = modulesAt(resolve(process.env.DSH_CHECKOUT));
-    if (!modules) throw new Error(`${usage}\nDSH_CHECKOUT=${process.env.DSH_CHECKOUT}`);
-    return modules;
-  }
+  const checkout = process.env.DSH_CHECKOUT ?? defaultCheckout.pathname;
+  const checkoutModules = modulesAt(resolve(checkout));
+  if (checkoutModules) return checkoutModules;
+  if (process.env.DSH_CHECKOUT) throw new Error(`${usage}\nDSH_CHECKOUT=${process.env.DSH_CHECKOUT}`);
   try {
     const dsh = require.resolve("@deepseek-ai/dsh/package.json");
     const modules = dirname(dirname(dirname(dsh)));
