@@ -110,6 +110,18 @@ function set(environment: Record<string, string>, key: string, value: string, pl
 function remove(environment: Record<string, string>, key: string, platform: NodeJS.Platform): void { for (const existing of Object.keys(environment)) if (platform !== "win32" ? existing === key : existing.toLowerCase() === key.toLowerCase()) delete environment[existing]; }
 function applyLayer(environment: Record<string, string>, input: NodeJS.ProcessEnv, layer: EnvironmentLayer | undefined, platform: NodeJS.Platform): void { for (const key of layer?.remove ?? []) remove(environment, key, platform); for (const [key, value] of Object.entries(layer?.set ?? {})) { if (typeof value === "string") set(environment, key, value, platform); else { const found = platform === "win32" ? Object.entries(input).find(([name]) => name.toLowerCase() === value.fromEnvironment.toLowerCase())?.[1] : input[value.fromEnvironment]; if (found === undefined) { if (value.required !== false) throw new Error(`MISSING_ENVIRONMENT_REFERENCE: ${value.fromEnvironment}`); remove(environment, key, platform); } else set(environment, key, found, platform); } } }
 
+export interface ConfiguredResolutionPlan { manifest: ProgramManifest; environment: Record<string, string>; programEnvironment(definition: ManifestProgram): Record<string, string>; }
+export function configuredResolutionPlan(value: unknown, input: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): ConfiguredResolutionPlan {
+  const manifest = parseProgramManifest(value, platform);
+  const environment = Object.fromEntries(Object.entries(input).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  const pathKey = platform === "win32" ? Object.keys(environment).find(key => key.toLowerCase() === "path") ?? "PATH" : "PATH";
+  const paths = [...(manifest.searchPath ?? []), ...(manifest.allowInheritedPath ? [environment[pathKey] ?? ""] : [])].filter(Boolean);
+  environment[pathKey] = paths.join(platform === "win32" ? ";" : delimiter);
+  if (platform === "win32") set(environment, "PATHEXT", manifest.pathExt ?? ".COM;.EXE;.BAT;.CMD", platform);
+  applyLayer(environment, input, manifest.environment, platform);
+  return { manifest, environment, programEnvironment(definition) { const result = { ...environment }; applyLayer(result, input, definition.environment, platform); return result; } };
+}
+
 export async function createCommandRuntime(options: CommandRuntimeOptions): Promise<CommandRuntime> {
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
   const maxConcurrentExecutions = options.maxConcurrentExecutions ?? 8;
@@ -120,22 +132,16 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   const rootIdentities = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; }));
   const input = Object.freeze(Object.fromEntries(Object.entries(options.environment ?? process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)));
   const configured = options.manifest !== undefined;
-  const manifest = configured ? parseProgramManifest(options.manifest, platform) : undefined;
+  const plan = configured ? configuredResolutionPlan(options.manifest, input, platform) : undefined;
+  const manifest = plan?.manifest;
   const manifestDirectory = options.manifestPath ? dirname(resolve(options.manifestPath)) : options.manifestDirectory;
-  const environment: Record<string, string> = { ...input };
-  if (manifest) {
-    const pathKey = platform === "win32" ? Object.keys(environment).find(key => key.toLowerCase() === "path") ?? "PATH" : "PATH";
-    const paths = [...(manifest.searchPath ?? []), ...(manifest.allowInheritedPath ? [environment[pathKey] ?? ""] : [])].filter(Boolean);
-    environment[pathKey] = paths.join(platform === "win32" ? ";" : delimiter);
-    if (platform === "win32") set(environment, "PATHEXT", manifest.pathExt ?? ".COM;.EXE;.BAT;.CMD", platform);
-    applyLayer(environment, input, manifest.environment, platform);
-  }
+  const environment: Record<string, string> = plan?.environment ?? { ...input };
   const definitions: Record<string, ManifestProgram> = manifest?.programs ?? Object.fromEntries(Object.entries(DEFAULT_ALIASES).filter(([name]) => name !== "powershell").map(([name, candidates]) => [name, { candidates: [...candidates] }]));
   const programs: Record<string, RegisteredProgram> = {};
   const policies: Record<string, ProgramPolicy> = {};
   for (const [logicalName, definition] of Object.entries(definitions)) {
     if (definition.enabled === false) continue;
-    const perProgramEnvironment = { ...environment }; applyLayer(perProgramEnvironment, input, definition.environment, platform);
+    const perProgramEnvironment = plan?.programEnvironment(definition) ?? { ...environment };
     let executable: string | undefined;
     let declaredCandidate: string | undefined;
     for (const candidate of definition.candidates) {
@@ -171,7 +177,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd;
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
-      const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);
+      const childEnvironment = plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
       const result = await executeProgram({ program: definition, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });

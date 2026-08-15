@@ -2,12 +2,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import { CliUsageError, parseCli, selectDetectedPrograms } from "../src/cli.js";
-import { codexSnippet, dshSnippet } from "../src/management.js";
+import { codexSnippet, doctor, dshSnippet } from "../src/management.js";
 import { parseProgramManifest } from "../src/runtime.js";
-import { resolveExecutableMatches } from "../src/program-registry.js";
 
 const cli = ["dist/src/cli.js"];
 const run = (args: string[]) => spawnSync(process.execPath, [...cli, ...args], { cwd: process.cwd(), encoding: "utf8" });
@@ -16,12 +15,17 @@ const manifest = (programs: Record<string, unknown>, probes?: Record<string, unk
 
 test("CLI parses commands and reports invocation failures as typed usage errors", () => {
   assert.equal(parseCli(["serve", "--root", ".", "--root", ".."]).command, "serve");
-  assert.equal(parseCli(["doctor", "--execute", "--all"]).all, true);
+  assert.equal(parseCli(["doctor", "--execute", "--all", "--manifest", "manifest.json"]).all, true);
   assert.throws(() => parseCli(["doctor", "--all"]), CliUsageError);
   assert.throws(() => parseCli(["bogus"]), CliUsageError);
   assert.throws(() => parseCli(["serve", "--default-timeout-ms", "0"]), CliUsageError);
   assert.equal(run(["doctor", "--all"]).status, 2);
+  assert.equal(run(["doctor"]).status, 2);
   assert.equal(run(["serve", "--unknown"]).status, 2);
+  assert.equal(run(["serve", "--manifest", "missing.json"]).status, 2);
+  const invalid = run(["serve", "--manifest", "missing.json", "--root", process.cwd()]);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /MANIFEST_READ_FAILED/);
   const configured = run(["print-config", "dsh", "--manifest", "missing.json"]);
   assert.equal(configured.status, 1);
   assert.match(configured.stderr, /ROOT_REQUIRED/);
@@ -69,17 +73,24 @@ test("probe declarations are strict runtime manifest fields and multi-root probe
   } finally { await rm(directory, { recursive: true, force: true }); await rm(other, { recursive: true, force: true }); }
 });
 
-test("resolver diagnostics retain winner and shadowed executable matches", async () => {
-  const first = await mkdtemp(join(tmpdir(), "system-command-path-")); const second = await mkdtemp(join(tmpdir(), "system-command-path-"));
+test("doctor shadows use the program's effective environment layer", async () => {
+  const first = await mkdtemp(join(tmpdir(), "system-command-path-")); const second = await mkdtemp(join(tmpdir(), "system-command-path-")); const path = join(first, "manifest.json");
   try {
-    for (const directory of [first, second]) { const file = join(directory, "tool"); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o755); }
-    const matches = await resolveExecutableMatches(["tool"], { path: `${first}:${second}`, platform: "linux" });
-    assert.deepEqual(matches, [join(first, "tool"), join(second, "tool")]);
+    const filename = process.platform === "win32" ? "tool.exe" : "tool";
+    for (const directory of [first, second]) { const file = join(directory, filename); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o755); }
+    await writeFile(path, JSON.stringify({ version: 1, environment: { set: { PATH: first } }, programs: { tool: { candidates: [filename], environment: { set: { PATH: `${second}${delimiter}${first}` } } } } }));
+    const result = await doctor({ manifestPath: path, roots: [first] });
+    assert.ok(result.message.includes(`tool: winner ${join(second, filename)}`));
+    assert.ok(result.message.includes(`shadowed ${join(first, filename)}`));
   } finally { await rm(first, { recursive: true, force: true }); await rm(second, { recursive: true, force: true }); }
 });
 
-test("configuration snippets use Codex 30/300 and the DSH rc.6 plugin row", () => {
-  const options = { roots: ["C:\\work dir\\quoted\\\"root"], manifestPath: "C:\\configs\\manifest.json" };
+test("configuration snippets preserve every serve execution option", () => {
+  const options = { roots: ["C:\\work dir\\quoted\\\"root", "C:\\second root"], manifestPath: "C:\\configs\\manifest.json", artifactDirectory: "C:\\artifacts", artifactRetentionMs: 1, artifactQuotaBytes: 2, artifactMaxStreamBytes: 3, maxOutputBytes: 4, inlineHeadBytes: 5, defaultTimeoutMs: 6 };
+  const parsed = parseCli((JSON.parse(`[${codexSnippet(options).match(/args = \[(.*)\]/)![1]}]`) as string[]).slice(1));
+  assert.deepEqual(parsed.options, { ...options, roots: options.roots.map(root => join(root)), manifestPath: join(options.manifestPath), artifactDirectory: join(options.artifactDirectory) });
+  const dshArgs = [...dshSnippet(options).matchAll(/^      - (".*")$/gm)].map(match => JSON.parse(match[1]!));
+  assert.deepEqual(parseCli(dshArgs.slice(1)).options, parsed.options);
   const previous = process.env.CODEX_HOME; process.env.CODEX_HOME = "C:\\custom-codex-home";
   try { const codex = codexSnippet(options); assert.match(codex, /\$CODEX_HOME\/config\.toml/); assert.match(codex, /effective: C:\\custom-codex-home\//); assert.match(codex, /startup_timeout_sec = 30/); assert.match(codex, /tool_timeout_sec = 300/); } finally { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous; }
   const dsh = dshSnippet(options); assert.match(dsh, /^- id: system-command/m); assert.match(dsh, /name: "@deepseek-ai\/dsh-mcp-client"/); assert.match(dsh, /toolCallTimeoutMs: 30000/); assert.doesNotMatch(dsh, /mcpServers:|reconnect: true/);

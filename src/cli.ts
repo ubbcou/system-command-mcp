@@ -43,6 +43,8 @@ export function parseCli(argv: readonly string[]): Parsed {
     else throw new CliUsageError(`UNKNOWN_OPTION: ${flag}`);
   }
   if (all && !execute) throw new CliUsageError("--all requires --execute");
+  if (command === "doctor" && !options.manifestPath) throw new CliUsageError("MANIFEST_REQUIRED");
+  if (command === "serve" && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
   return { command, target, options, execute, all, force, yes, initPath, legacy };
 }
 

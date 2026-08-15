@@ -1,7 +1,7 @@
 import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
-import { createCommandRuntime, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { configuredResolutionPlan, createCommandRuntime, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
 import { parseManifestProbes } from "./manifest-probes.js";
 import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
 
@@ -74,7 +74,8 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
   const rawManifest = await validatedManifest(options.manifestPath);
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
   for (const root of options.roots) { try { if (!(await stat(root)).isDirectory()) throw new Error(); } catch { throw new Error(`ROOT_NOT_DIRECTORY: ${root}`); } }
-  const manifest = parseProgramManifest(rawManifest);
+  const plan = configuredResolutionPlan(rawManifest);
+  const manifest = plan.manifest;
   const declaredProbes = parseManifestProbes(rawManifest);
   if (options.roots.length > 1) for (const [name, probe] of Object.entries(declaredProbes)) {
     if (!probe.cwd) throw new Error(`INVALID_MANIFEST: manifest.probes.${name}.cwd is required for multiple roots`);
@@ -84,9 +85,12 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
   try {
     const environment = await runtime.inspectEnvironment();
     const winners = Object.values(environment.programs).map(program => `${program.logicalName}=${program.declaredCandidate} -> ${program.executable}`).join(", ");
-    const path = [...(manifest.searchPath ?? []), ...(manifest.allowInheritedPath ? [process.env.PATH ?? ""] : [])].filter(Boolean).join(process.platform === "win32" ? ";" : delimiter);
     const shadows = (await Promise.all(Object.entries(manifest.programs).map(async ([name, program]) => {
-      const matches = await resolveExecutableMatches(program.candidates, { path, pathExt: manifest.pathExt, manifestDirectory: options.manifestPath && dirname(resolve(options.manifestPath)) });
+      if (program.enabled === false) return undefined;
+      const environment = plan.programEnvironment(program);
+      const path = process.platform === "win32" ? Object.entries(environment).find(([key]) => key.toLowerCase() === "path")?.[1] : environment.PATH;
+      const pathExt = process.platform === "win32" ? Object.entries(environment).find(([key]) => key.toLowerCase() === "pathext")?.[1] : undefined;
+      const matches = await resolveExecutableMatches(program.candidates, { path, pathExt, manifestDirectory: options.manifestPath && dirname(resolve(options.manifestPath)) });
       return matches.length > 1 ? `${name}: winner ${matches[0]}; shadowed ${matches.slice(1).join(", ")}` : undefined;
     }))).filter((value): value is string => value !== undefined);
     const diagnostic = `${winners || "none"}${shadows.length ? `; shadows: ${shadows.join(" | ")}` : ""}`;
@@ -108,6 +112,8 @@ function configArgs(options: ManagementOptions): string[] {
   const args = [entryPath(), "serve"];
   if (options.manifestPath) args.push("--manifest", resolve(options.manifestPath));
   for (const root of options.roots) args.push("--root", resolve(root));
+  if (options.artifactDirectory) args.push("--artifact-dir", resolve(options.artifactDirectory));
+  for (const [flag, value] of [["--artifact-retention-ms", options.artifactRetentionMs], ["--artifact-quota-bytes", options.artifactQuotaBytes], ["--artifact-max-stream-bytes", options.artifactMaxStreamBytes], ["--max-output-bytes", options.maxOutputBytes], ["--inline-head-bytes", options.inlineHeadBytes], ["--default-timeout-ms", options.defaultTimeoutMs]] as const) if (value !== undefined) args.push(flag, String(value));
   return args;
 }
 

@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "test": "npm run build && node scripts/test.mjs",
     "start": "node dist/src/cli.js"
   },
