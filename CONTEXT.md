@@ -81,7 +81,7 @@ The single event that first moves a running Execution Request into termination: 
 _Avoid_: Kill reason, failure reason
 
 **Termination Outcome**:
-The structured account of whether graceful termination was requested, force was required, and the process tree was confirmed cleaned.
+The structured account of a termination reason, whether graceful or forced containment cleanup occurred, and whether contained members were confirmed cleaned; natural root completion may still require cleanup.
 _Avoid_: Exit status, kill result
 
 **Grace Period**:

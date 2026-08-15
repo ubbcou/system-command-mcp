@@ -38,7 +38,7 @@ export class ArtifactStore {
     const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
     await mkdir(staging, { mode: 0o700 });
     try {
-      await writeFile(join(staging, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+      await this.writeOwner(staging, owner);
       await writeFile(join(staging, "stdout"), "", { mode: 0o600 });
       await writeFile(join(staging, "stderr"), "", { mode: 0o600 });
       await rename(staging, path);
@@ -103,8 +103,8 @@ export class ArtifactStore {
       const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
       try {
         await mkdir(path, { mode: 0o700 });
-        await writeFile(join(path, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
-        const heartbeat = setInterval(() => { owner.leaseUntil = Date.now() + LOCK_STALE_MS; void writeFile(join(path, "owner.json"), JSON.stringify(owner), { mode: 0o600 }); }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3)));
+        await this.writeOwner(path, owner);
+        const heartbeat = setInterval(() => { owner.leaseUntil = Date.now() + LOCK_STALE_MS; void this.writeOwner(path, owner); }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3)));
         heartbeat.unref();
         try { return await action(); } finally { clearInterval(heartbeat); await this.removeOwned(path, owner); }
       } catch (error) {
@@ -115,25 +115,23 @@ export class ArtifactStore {
       }
     }
   }
+  private async writeOwner(path: string, owner: Owner): Promise<void> {
+    const target = join(path, "owner.json"); const temporary = `${target}.${randomBytes(16).toString("hex")}.tmp`;
+    try { await writeFile(temporary, JSON.stringify(owner), { mode: 0o600 }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }); throw error; }
+  }
+  private validOwner(value: Partial<Owner>): value is Owner { return /^[a-f0-9]{32}$/.test(value.runtimeId ?? "") && /^[a-f0-9]{32}$/.test(value.token ?? "") && typeof value.leaseUntil === "number" && Number.isSafeInteger(value.leaseUntil); }
   private async removeOwned(path: string, owner: Owner): Promise<void> {
     try { const current = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (current.runtimeId === owner.runtimeId && current.token === owner.token && current.leaseUntil === owner.leaseUntil) await rm(path, { recursive: true, force: true }); } catch { /* ownership changed or lock already gone */ }
   }
-  private async touchSpools(): Promise<void> { await Promise.all([...this.spools].map(async spool => { try { spool.owner.leaseUntil = Date.now() + LOCK_STALE_MS; await writeFile(join(spool.path, "owner.json"), JSON.stringify(spool.owner), { mode: 0o600 }); } catch { spool.failed = true; } })); }
+  private async touchSpools(): Promise<void> { await Promise.all([...this.spools].map(async spool => { try { spool.owner.leaseUntil = Date.now() + LOCK_STALE_MS; await this.writeOwner(spool.path, spool.owner); } catch { spool.failed = true; } })); }
   private async removeStaleLock(path: string): Promise<void> {
-    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (typeof owner.token === "string" && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner as Owner); } catch { /* malformed lock is not ours to remove */ }
+    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (this.validOwner(owner) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner); } catch { /* malformed lock is not ours to remove */ }
   }
   private async removeStaleSpool(path: string): Promise<void> {
-    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (typeof owner.runtimeId === "string" && /^[a-f0-9]{32}$/.test(owner.token ?? "") && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner as Owner); } catch { await rm(path, { recursive: true, force: true }).catch(() => {}); }
+    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (this.validOwner(owner) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner); } catch { /* malformed owner is not enough to remove a spool */ }
   }
   private async recover(): Promise<void> {
-    for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && entry.name.startsWith(".spool-")) {
-      const path = join(this.directory, entry.name);
-      try {
-        const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>;
-        if (typeof owner.runtimeId === "string" && /^[a-f0-9]{32}$/.test(owner.token ?? "") && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil >= Date.now()) continue;
-      } catch { /* ownerless or malformed spool is stale */ }
-      await this.removeStaleSpool(path);
-    }
+    for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && entry.name.startsWith(".spool-")) await this.removeStaleSpool(join(this.directory, entry.name));
   }
   private async publishedSize(): Promise<number> { let total = 0; for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && validId.test(entry.name)) { const meta = await this.validMeta(join(this.directory, entry.name)); if (meta) total += meta.stdoutBytes + meta.stderrBytes; } return total; }
   private async validMeta(path: string): Promise<Metadata | undefined> { try { const raw: unknown = JSON.parse(await readFile(join(path, "meta.json"), "utf8")); const meta = raw as Partial<Metadata>; const publishedAt = meta?.publishedAt; const stdoutBytes = meta?.stdoutBytes; const stderrBytes = meta?.stderrBytes; return meta?.version === 1 && meta.state === "published" && typeof publishedAt === "number" && Number.isSafeInteger(publishedAt) && publishedAt >= 0 && typeof stdoutBytes === "number" && Number.isSafeInteger(stdoutBytes) && stdoutBytes >= 0 && typeof stderrBytes === "number" && Number.isSafeInteger(stderrBytes) && stderrBytes >= 0 ? meta as Metadata : undefined; } catch { return undefined; } }
