@@ -195,3 +195,7 @@ _Avoid_: Startup check, health command
 **Root Identity**:
 The platform-specific identity of an authorized Working Directory Root captured at startup, when available, to detect replacement of the directory object at the same path.
 _Avoid_: Root path, real path
+
+**Node Project Resolver**:
+The optional startup snapshot of installed Node variants and per-Execution Request project-declaration selection that preserves `node` as one Logical Program while selecting an executable without changing global state.
+_Avoid_: Node switcher, active Node version

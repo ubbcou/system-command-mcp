@@ -8,6 +8,15 @@ export interface RegisteredProgram {
   kind: ProgramKind;
   /** Native executables receive literal argv; cmd scripts are reparsed by cmd.exe. */
   argumentSemantics: ArgumentSemantics;
+  resolver?: { kind: "node-project"; installed: { version: string; executable: string }[]; fallbackExecutable: string };
+}
+
+export interface ProgramSelection {
+  logicalName: string;
+  executable: string;
+  version?: string;
+  requirement?: string;
+  source?: string;
 }
 
 export interface EnvironmentSnapshot {
@@ -67,4 +76,5 @@ export interface ExecuteResult {
   timedOut: boolean;
   cancelled: boolean;
   termination: TerminationOutcome | null;
+  programSelection?: ProgramSelection;
 }

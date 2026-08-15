@@ -5,6 +5,7 @@ import { ArtifactStore, type ArtifactPolicy, type ArtifactStatus, type OutputEnc
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
 import { parseManifestProbes } from "./manifest-probes.js";
+import { discoverNodeVariants, parseNodeResolution, projectNodeSelection, withNodePath, type NodeResolution, type NodeVariant } from "./node-resolution.js";
 import { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, validateRuntimeLimits } from "./config.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
 
@@ -13,7 +14,7 @@ export interface ManifestProgram { candidates: string[]; required?: boolean; ena
 export interface EnvironmentReference { fromEnvironment: string; required?: boolean; }
 export type EnvironmentValue = string | EnvironmentReference;
 export interface EnvironmentLayer { remove?: string[]; set?: Record<string, EnvironmentValue>; }
-export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; programs: Record<string, ManifestProgram>; platforms?: Record<string, { searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; programs?: Record<string, Partial<ManifestProgram>> }>; }
+export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; nodeResolution?: NodeResolution; programs: Record<string, ManifestProgram>; platforms?: Record<string, { searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; nodeResolution?: NodeResolution; programs?: Record<string, Partial<ManifestProgram>> }>; }
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult & { artifact: ArtifactStatus }>; readOutput(id: string, stream: OutputStream, offset: number, limit: number, encoding: OutputEncoding): Promise<OutputPage>; close(): Promise<void>; }
@@ -65,7 +66,7 @@ function validatePolicy(value: ProgramPolicy | undefined, path: string): void { 
 export function effectiveTimeoutMs(policy: ProgramPolicy | undefined, globalDefaultTimeoutMs?: number, suppliedTimeoutMs?: number): number { return suppliedTimeoutMs ?? policy?.defaultTimeoutMs ?? globalDefaultTimeoutMs ?? 30_000; }
 
 export function parseProgramManifest(value: unknown, platform: NodeJS.Platform = process.platform): ProgramManifest {
-  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "programs", "platforms", "probes"], "manifest");
+  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "nodeResolution", "programs", "platforms", "probes"], "manifest");
   if (root.version !== 1) throw new Error("INVALID_MANIFEST: version must be 1");
   if (!root.programs) throw new Error("INVALID_MANIFEST: programs is required");
   if (root.searchPath !== undefined && (!Array.isArray(root.searchPath) || !root.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");
@@ -80,11 +81,12 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
   const platformOverrides: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(platforms)) {
-    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "pathExt", "allowInheritedPath", "environment", "programs"], `manifest.platforms.${name}`);
+    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "pathExt", "allowInheritedPath", "environment", "nodeResolution", "programs"], `manifest.platforms.${name}`);
     if (item.searchPath !== undefined && (!Array.isArray(item.searchPath) || !item.searchPath.every(x => typeof x === "string"))) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.searchPath`);
     if (item.pathExt !== undefined && typeof item.pathExt !== "string") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.pathExt`);
     if (item.allowInheritedPath !== undefined && typeof item.allowInheritedPath !== "boolean") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.allowInheritedPath`);
     layer(item.environment, `manifest.platforms.${name}.environment`);
+    parseNodeResolution(item.nodeResolution, `manifest.platforms.${name}.nodeResolution`);
     const overrides = item.programs === undefined ? {} : object(item.programs, `manifest.platforms.${name}.programs`);
     for (const [programName, definition] of Object.entries(overrides)) {
       if (!LOGICAL_PROGRAM_NAME.test(programName)) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.programs.${programName}`);
@@ -101,7 +103,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
   for (const [name, item] of Object.entries(overrides)) programs[name] = mergeProgram(programs[name]!, program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>);
   for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
-  return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)) };
+  return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)), nodeResolution: parseNodeResolution(override.nodeResolution ?? root.nodeResolution, `manifest.platforms.${platform}.nodeResolution`) };
 }
 
 function isInside(root: string, candidate: string): boolean { const child = relative(root, candidate); return child === "" || (!child.startsWith("..") && !isAbsolute(child)); }
@@ -134,8 +136,10 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   const configured = options.manifest !== undefined;
   const plan = configured ? configuredResolutionPlan(options.manifest, input, platform) : undefined;
   const manifest = plan?.manifest;
+  const nodeResolution = manifest?.nodeResolution;
   const manifestDirectory = options.manifestPath ? dirname(resolve(options.manifestPath)) : options.manifestDirectory;
   const environment: Record<string, string> = plan?.environment ?? { ...input };
+  const nodeVariants: readonly NodeVariant[] = nodeResolution ? await discoverNodeVariants(nodeResolution, input, platform) : [];
   const definitions: Record<string, ManifestProgram> = manifest?.programs ?? Object.fromEntries(Object.entries(DEFAULT_ALIASES).filter(([name]) => name !== "powershell").map(([name, candidates]) => [name, { candidates: [...candidates] }]));
   const programs: Record<string, RegisteredProgram> = {};
   const policies: Record<string, ProgramPolicy> = {};
@@ -158,7 +162,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   let closing = false;
   let closePromise: Promise<void> | undefined;
   const active = new Map<Promise<ExecuteResult>, AbortController>();
-  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
+  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && nodeResolution?.enabled ? { ...definition, resolver: { kind: "node-project", installed: nodeVariants.map(item => ({ ...item })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
   return { async inspectEnvironment() { return snapshot(); }, execute(request) {
     if (closing) return Promise.reject(new Error("RUNTIME_CLOSING"));
     if (active.size >= maxConcurrentExecutions) return Promise.reject(new Error("CONCURRENCY_LIMIT"));
@@ -177,13 +181,14 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd;
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
-      const childEnvironment = plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
+      const selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isInside(root, cwd))!, nodeVariants, definition) : { program: definition };
+      const childEnvironment = selection.program.logicalName === "node" && selection.program.executable !== definition.executable ? withNodePath(plan?.programEnvironment(definitions[request.program]!) ?? { ...environment }, selection.program, platform) : plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
-      const result = await executeProgram({ program: definition, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });
+      const result = await executeProgram({ program: selection.program, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });
       const wantedArtifact = artifactPolicy === "always" || (artifactPolicy === "on-truncation" && (result.stdout.truncated || result.stderr.truncated)); let artifact: ArtifactStatus = artifactPolicy === "never" ? { status: "not-requested" } : spoolAttemptFailed ? { status: "unavailable" } : { status: "discarded" };
       if (wantedArtifact) { if (!spool || spool.failed) artifact = { status: "unavailable" }; else try { artifact = { status: "published", id: await artifacts.publish(spool) }; spool = undefined; } catch { artifact = { status: "unavailable" }; } }
-      await artifacts.discard(spool); return { ...result, artifact };
+      await artifacts.discard(spool); return { ...result, artifact, programSelection: { logicalName: request.program, executable: selection.program.executable, ...(selection.version ? { version: selection.version } : {}), ...(selection.requirement ? { requirement: selection.requirement } : {}), ...(selection.source ? { source: selection.source } : {}) } };
     })();
     active.set(execution, controller);
     return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });
