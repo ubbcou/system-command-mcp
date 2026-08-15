@@ -1,8 +1,8 @@
 import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import semver from "semver";
 import { configuredResolutionPlan, createCommandRuntime, effectiveTimeoutMs, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
+import { discoverNodeVariants } from "./node-resolution.js";
 import { parseManifestProbes } from "./manifest-probes.js";
 import { validateRuntimeLimits } from "./config.js";
 import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
@@ -55,16 +55,9 @@ export async function validatedManifest(path: string): Promise<unknown> {
 
 type JsonObject = Record<string, unknown>;
 const jsonObject = (value: unknown): JsonObject => value as JsonObject;
-const effectiveNodeResolution = (manifest: JsonObject, platform: string): JsonObject | undefined => {
-  const override = jsonObject(jsonObject(manifest.platforms ?? {})[platform] ?? {});
-  return (override.nodeResolution ?? manifest.nodeResolution) as JsonObject | undefined;
-};
-const candidateVersion = (candidate: string): string | undefined => {
-  for (const segment of dirname(candidate).split(/[\\/]+/)) {
-    const normalized = segment.replace(/^v/, "");
-    if (semver.valid(normalized)) return normalized;
-  }
-  return undefined;
+const sameNodeResolution = (left: JsonObject | undefined, right: JsonObject | undefined): boolean => {
+  const normalized = (value: JsonObject | undefined) => ({ enabled: value?.enabled ?? false, installationRoots: value?.installationRoots ?? undefined });
+  return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right));
 };
 
 export async function migrateManifest(input: string, output = `${input}.v2.json`, roots: readonly string[]): Promise<string> {
@@ -72,25 +65,31 @@ export async function migrateManifest(input: string, output = `${input}.v2.json`
   const raw = await readManifest(input);
   const manifest = jsonObject(raw);
   const platforms = jsonObject(manifest.platforms ?? {});
-  const applicable = effectiveNodeResolution(manifest, process.platform);
-  if (applicable?.enabled !== true) throw new Error("MIGRATION_NOT_APPLICABLE");
-  const projectNode = (platform: string, resolution: JsonObject): JsonObject => {
-    const candidate = parseProgramManifest(raw, platform as NodeJS.Platform).programs.node?.candidates.find(item => candidateVersion(item) !== undefined);
-    if (!candidate) throw new Error("MIGRATION_DEFAULT_VERSION_UNAVAILABLE");
-    return { installationRoots: resolution.installationRoots, enabledRoots: [...roots], defaultVersion: candidateVersion(candidate) };
-  };
-  const migratedPlatforms = Object.fromEntries(Object.entries(platforms).map(([name, value]) => {
-    const platform = { ...jsonObject(value) };
-    const resolution = effectiveNodeResolution(manifest, name);
-    delete platform.nodeResolution;
-    if (jsonObject(value).nodeResolution !== undefined && resolution?.enabled === true) platform.projectNode = projectNode(name, resolution);
-    return [name, platform];
-  }));
   const baseResolution = manifest.nodeResolution as JsonObject | undefined;
+  if (baseResolution?.enabled !== true) throw new Error("MIGRATION_NOT_APPLICABLE");
+  for (const value of Object.values(platforms)) {
+    const override = jsonObject(value).nodeResolution as JsonObject | undefined;
+    if (override !== undefined && !sameNodeResolution(baseResolution, override)) throw new Error("MIGRATION_PLATFORM_OVERRIDE_UNSUPPORTED");
+  }
+  const plan = configuredResolutionPlan(raw);
+  const definition = plan.manifest.programs.node;
+  if (!definition || definition.enabled === false) throw new Error("MIGRATION_DEFAULT_VERSION_UNAVAILABLE");
+  const environment = plan.programEnvironment(definition);
+  const path = process.platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === "path")?.[1] : environment.PATH;
+  const pathExt = process.platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === "pathext")?.[1] : undefined;
+  let executable: string | undefined;
+  for (const candidate of definition.candidates) {
+    executable = await resolveExecutable([candidate], { platform: process.platform, manifestDirectory: dirname(resolve(input)), path, pathExt });
+    if (executable) break;
+  }
+  const variants = await discoverNodeVariants({ enabled: true, installationRoots: baseResolution.installationRoots as string[] | undefined }, process.env, process.platform);
+  const selected = variants.find(variant => variant.executable === executable);
+  if (!selected) throw new Error("MIGRATION_DEFAULT_VERSION_UNAVAILABLE");
+  const migratedPlatforms = Object.fromEntries(Object.entries(platforms).map(([name, value]) => { const platform = { ...jsonObject(value) }; delete platform.nodeResolution; return [name, platform]; }));
   const migrated: JsonObject = {
     ...manifest,
     version: 2,
-    ...(baseResolution?.enabled === true ? { projectNode: projectNode(process.platform, baseResolution) } : {}),
+    projectNode: { installationRoots: baseResolution.installationRoots, enabledRoots: [...roots], defaultVersion: selected.version },
     ...(manifest.platforms === undefined ? {} : { platforms: migratedPlatforms }),
   };
   delete migrated.nodeResolution;

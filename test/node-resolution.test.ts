@@ -104,6 +104,15 @@ test("v2 conflicts fail closed and keeps outside enabled roots static", async ()
   try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_DECLARATION_CONFLICT/); await rm(join(project, ".node-version")); await writeFile(join(project, ".nvmrc"), "22"); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_VERSION_REQUIREMENT_INVALID: \.nvmrc/); const result = await instance.execute({ program: "node", cwd: outside }); assert.equal(result.programSelection?.version, undefined); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("v2 chooses the deepest overlapping enabled root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-overlap-")); await node(root, "v20.1.0"); await node(root, "v22.2.0");
+  const outer = join(root, "projects"); const nested = join(outer, "nested"); const cwd = join(nested, "app"); await mkdir(cwd, { recursive: true });
+  await writeFile(join(outer, ".nvmrc"), "20.1.0"); await writeFile(join(outer, "package.json"), JSON.stringify({ engines: { node: "<21" } }));
+  const instance = await createCommandRuntime({ roots: [root], environment: { Path: dirname(execPath), PATH: dirname(execPath) }, manifest: { version: 2, projectNode: { enabledRoots: [outer, nested], installationRoots: [root], defaultVersion: "22.2.0" }, allowInheritedPath: true, programs: { node: { candidates: [execPath], required: true } } } });
+  try { const result = await instance.execute({ program: "node", args: ["--version"], cwd }); assert.equal(result.programSelection?.version, "22.2.0"); assert.equal(result.programSelection?.source, "manifest#projectNode.defaultVersion"); }
+  finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("v2 authorizes roots and supports platform override", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-root-")); await node(root, "v22.2.0");
   try {
