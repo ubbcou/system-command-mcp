@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { CliUsageError, parseCli, selectDetectedPrograms } from "../src/cli.js";
-import { codexSnippet, doctor, dshSnippet } from "../src/management.js";
+import { codexSnippet, doctor, dshSnippet, migrateManifest } from "../src/management.js";
 import { parseProgramManifest } from "../src/runtime.js";
 
 const cli = ["dist/src/cli.js"];
@@ -15,6 +15,13 @@ const manifest = (programs: Record<string, unknown>, probes?: Record<string, unk
 
 test("CLI parses commands and reports invocation failures as typed usage errors", () => {
   assert.equal(parseCli(["serve", "--root", ".", "--root", ".."]).command, "serve");
+  const migration = parseCli(["migrate-manifest", "in.json", "out.json", "--root", ".", "--root", ".."]);
+  assert.equal(migration.command, "migrate-manifest");
+  assert.equal(migration.inputPath, join(process.cwd(), "in.json"));
+  assert.equal(migration.outputPath, join(process.cwd(), "out.json"));
+  assert.equal(migration.options.roots.length, 2);
+  assert.throws(() => parseCli(["migrate-manifest", "in.json"]), /ROOT_REQUIRED/);
+  assert.throws(() => parseCli(["migrate-manifest", "in.json", "--root", ".", "--manifest", "other.json"]), /UNKNOWN_OPTION/);
   assert.equal(parseCli(["doctor", "--execute", "--all", "--manifest", "manifest.json", "--root", "."]).all, true);
   assert.throws(() => parseCli(["doctor", "--all"]), CliUsageError);
   assert.throws(() => parseCli(["bogus"]), CliUsageError);
@@ -35,6 +42,62 @@ test("CLI parses commands and reports invocation failures as typed usage errors"
   const configured = run(["print-config", "dsh", "--manifest", "missing.json"]);
   assert.equal(configured.status, 2);
   assert.match(configured.stderr, /ROOT_REQUIRED/);
+});
+
+test("migrate-manifest converts applicable v1 node resolution without overwriting", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-migrate-"));
+  const input = join(directory, "manifest.json");
+  const output = `${input}.v2.json`;
+  const installationRoot = join(directory, "node installs");
+  const enabledRoot = join(directory, "project");
+  const otherPlatform = process.platform === "win32" ? "linux" : "win32";
+  try {
+    await writeFile(input, JSON.stringify({
+      version: 1,
+      searchPath: [directory],
+      allowInheritedPath: false,
+      environment: { set: { TEST: "yes" } },
+      nodeResolution: { enabled: true, installationRoots: [installationRoot] },
+      programs: { node: { candidates: [join(installationRoot, "v22.14.0", "bin", process.platform === "win32" ? "node.exe" : "node")], required: true }, git: { candidates: ["git"] } },
+      platforms: { [otherPlatform]: { nodeResolution: { enabled: true, installationRoots: [join(directory, "other installs")] }, pathExt: ".EXE" } },
+      probes: { node: { args: ["--version"] } },
+    }));
+    assert.equal(await migrateManifest(input, undefined, [enabledRoot]), output);
+    const migrated = JSON.parse(await readFile(output, "utf8")) as Record<string, any>;
+    assert.equal(migrated.version, 2);
+    assert.equal(migrated.nodeResolution, undefined);
+    assert.deepEqual(migrated.projectNode, { installationRoots: [installationRoot], enabledRoots: [enabledRoot], defaultVersion: "22.14.0" });
+    assert.deepEqual(migrated.programs.git, { candidates: ["git"] });
+    assert.deepEqual(migrated.probes.node.args, ["--version"]);
+    assert.equal(migrated.platforms[otherPlatform].nodeResolution, undefined);
+    assert.deepEqual(migrated.platforms[otherPlatform].projectNode.installationRoots, [join(directory, "other installs")]);
+    parseProgramManifest(migrated);
+    await assert.rejects(migrateManifest(input, undefined, [enabledRoot]), /MANIFEST_EXISTS/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("migrate-manifest reports applicability and default-version errors", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-migrate-"));
+  const input = join(directory, "manifest.json");
+  try {
+    await writeFile(input, JSON.stringify({ version: 1, programs: { node: { candidates: ["node"] } } }));
+    await assert.rejects(migrateManifest(input, undefined, [directory]), /MIGRATION_NOT_APPLICABLE/);
+    await writeFile(input, JSON.stringify({ version: 1, nodeResolution: { enabled: true, installationRoots: [directory] }, programs: { node: { candidates: ["node"] } } }));
+    await assert.rejects(migrateManifest(input, undefined, [directory]), /MIGRATION_DEFAULT_VERSION_UNAVAILABLE/);
+    await assert.rejects(migrateManifest(input, undefined, []), /ROOT_REQUIRED/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("migrate-manifest CLI writes the default output", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-migrate-"));
+  const input = join(directory, "manifest.json");
+  try {
+    await writeFile(input, JSON.stringify({ version: 1, nodeResolution: { enabled: true, installationRoots: [directory] }, programs: { node: { candidates: [join(directory, "v20.11.1", "node.exe")] } } }));
+    const result = run(["migrate-manifest", input, "--root", directory]);
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /wrote .*manifest\.json\.v2\.json/);
+    assert.equal((JSON.parse(await readFile(`${input}.v2.json`, "utf8")) as { version: number }).version, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("init selection makes --yes optional and supports deterministic core selection", async () => {

@@ -3,12 +3,12 @@ import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { codexSnippet, discoveredManifest, doctor, dshSnippet, EXIT, readManifest, runtimeOptions, writeManifestTemplate, type ManagementOptions } from "./management.js";
+import { codexSnippet, discoveredManifest, doctor, dshSnippet, EXIT, migrateManifest, readManifest, runtimeOptions, writeManifestTemplate, type ManagementOptions } from "./management.js";
 import { createServer } from "./server.js";
 import { MAX_ARTIFACT_QUOTA_BYTES, MAX_ARTIFACT_RETENTION_MS, MAX_ARTIFACT_STREAM_BYTES, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, MAX_OUTPUT_BYTES, validateRuntimeLimits } from "./config.js";
 
-type Command = "serve" | "init" | "doctor" | "print-config";
-interface Parsed { command: Command; target?: "codex" | "dsh"; options: ManagementOptions; execute: boolean; all: boolean; force: boolean; yes: boolean; initPath?: string; legacy: boolean; }
+type Command = "serve" | "init" | "doctor" | "print-config" | "migrate-manifest";
+interface Parsed { command: Command; target?: "codex" | "dsh"; options: ManagementOptions; execute: boolean; all: boolean; force: boolean; yes: boolean; initPath?: string; inputPath?: string; outputPath?: string; legacy: boolean; }
 export class CliUsageError extends Error { }
 
 function integer(value: string, name: string, maximum = Number.MAX_SAFE_INTEGER): number { const result = Number(value); if (!Number.isSafeInteger(result) || result <= 0 || result > maximum) throw new CliUsageError(`INVALID_OPTION: ${name}`); return result; }
@@ -16,14 +16,19 @@ function requireValue(argv: readonly string[], index: number, flag: string): str
 
 export function parseCli(argv: readonly string[]): Parsed {
   const first = argv[0];
-  if (first && !first.startsWith("--") && !["serve", "init", "doctor", "print-config"].includes(first)) throw new CliUsageError(`UNKNOWN_COMMAND: ${first}`);
-  const command: Command = first === "serve" || first === "init" || first === "doctor" || first === "print-config" ? first : "serve";
+  if (first && !first.startsWith("--") && !["serve", "init", "doctor", "print-config", "migrate-manifest"].includes(first)) throw new CliUsageError(`UNKNOWN_COMMAND: ${first}`);
+  const command: Command = first === "serve" || first === "init" || first === "doctor" || first === "print-config" || first === "migrate-manifest" ? first : "serve";
   const legacy = command === "serve" && first !== "serve";
   let index = legacy ? 0 : 1;
   const options: ManagementOptions = { roots: [] };
-  let execute = false; let all = false; let force = false; let yes = false; let target: "codex" | "dsh" | undefined; let initPath: string | undefined;
+  let execute = false; let all = false; let force = false; let yes = false; let target: "codex" | "dsh" | undefined; let initPath: string | undefined; let inputPath: string | undefined; let outputPath: string | undefined;
   if (command === "print-config") { target = argv[index] as "codex" | "dsh" | undefined; index++; if (target !== "codex" && target !== "dsh") throw new CliUsageError("print-config requires codex or dsh"); }
   if (command === "init" && argv[index] && !argv[index]!.startsWith("--")) initPath = argv[index++];
+  if (command === "migrate-manifest") {
+    if (!argv[index] || argv[index]!.startsWith("--")) throw new CliUsageError("migrate-manifest requires input");
+    inputPath = resolve(argv[index++]!);
+    if (argv[index] && !argv[index]!.startsWith("--")) outputPath = resolve(argv[index++]!);
+  }
   for (; index < argv.length; index++) {
     const flag = argv[index]!;
     if ((flag === "--execute" || flag === "--probe") && command === "doctor") { execute = true; if (flag === "--probe") console.error("system-command-mcp: --probe is deprecated; use --execute"); continue; }
@@ -32,6 +37,7 @@ export function parseCli(argv: readonly string[]): Parsed {
     if (flag === "--yes" && command === "init") { yes = true; continue; }
     if (flag.startsWith("--") && ["--execute", "--probe", "--all", "--force", "--yes"].includes(flag)) throw new CliUsageError(`${flag} is not valid for ${command}`);
     const value = requireValue(argv, index, flag); index++;
+    if (command === "migrate-manifest" && flag !== "--root") throw new CliUsageError(`UNKNOWN_OPTION: ${flag}`);
     if (flag === "--manifest") options.manifestPath = resolve(value);
     else if (flag === "--root") options.roots.push(resolve(value));
     else if (flag === "--artifact-dir") options.artifactDirectory = resolve(value);
@@ -49,7 +55,8 @@ export function parseCli(argv: readonly string[]): Parsed {
   if ((command === "doctor" || command === "print-config") && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
   if (command === "doctor" && !options.manifestPath) throw new CliUsageError("MANIFEST_REQUIRED");
   if (command === "serve" && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
-  return { command, target, options, execute, all, force, yes, initPath, legacy };
+  if (command === "migrate-manifest" && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
+  return { command, target, options, execute, all, force, yes, initPath, inputPath, outputPath, legacy };
 }
 
 export async function selectDetectedPrograms(content: string, required: (name: string) => Promise<boolean>): Promise<string> {
@@ -86,6 +93,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (parsed.command === "doctor") { const result = await doctor(parsed.options, parsed.execute, parsed.all); console.error(`doctor: ${result.message}`); return; }
+  if (parsed.command === "migrate-manifest") { const path = await migrateManifest(parsed.inputPath!, parsed.outputPath, parsed.options.roots); console.error(`wrote ${path}`); return; }
   if (parsed.options.manifestPath && !parsed.options.roots.length) throw new Error("ROOT_REQUIRED");
   const options = { ...parsed.options, roots: parsed.options.roots.length ? parsed.options.roots : [process.cwd()] };
   process.stdout.write(parsed.target === "codex" ? codexSnippet(options) : dshSnippet(options));
