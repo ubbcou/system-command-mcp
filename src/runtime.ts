@@ -168,6 +168,8 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     if (!programs.node || programs.node.kind !== "native" || definitions.node?.enabled === false) throw new Error("NODE_RESOLUTION_NODE_REQUIRED");
     if (!nodeVariants.length) throw new Error("NODE_VARIANTS_UNAVAILABLE");
     if (projectNode?.defaultVersion && !nodeVariants.some(variant => variant.version === projectNode.defaultVersion)) throw new Error("PROJECT_NODE_VERSION_UNAVAILABLE: manifest#projectNode.defaultVersion");
+    if (projectNode && programs.npm && nodeVariants.some(variant => !variant.npmCli)) throw new Error("PROJECT_NPM_UNAVAILABLE");
+    if (projectNode && programs.npx && nodeVariants.some(variant => !variant.npxCli)) throw new Error("PROJECT_NPX_UNAVAILABLE");
   }
   if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
   const artifacts = new ArtifactStore(options.artifactDirectory ?? join(tmpdir(), "system-command-mcp-artifacts"), options.artifactRetentionMs ?? 24 * 60 * 60 * 1000, options.artifactQuotaBytes ?? 1024 * 1024 * 1024, options.artifactMaxStreamBytes ?? 100 * 1024 * 1024);
@@ -186,7 +188,6 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     const execution = (async (): Promise<ExecuteResult & { artifact: ArtifactStatus }> => {
       const definition = programs[request.program]; if (!definition) throw new Error(`PROGRAM_NOT_REGISTERED: ${request.program}`);
       const args = [...(request.args ?? [])]; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
-      if (definition.kind === "cmd-script" && args.some(argument => !cmdScriptArgumentIsSafe(argument))) throw new Error("UNSAFE_CMD_SCRIPT_ARGUMENT");
       try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
       const policy = policies[request.program] ?? {}; const timeoutMs = effectiveTimeoutMs(policy, options.defaultTimeoutMs, request.timeoutMs); if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_DEFAULT_TIMEOUT_MS, MAX_DEFAULT_TIMEOUT_MS)) throw new Error("INVALID_TIMEOUT");
       if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
@@ -204,13 +205,14 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
         const nodeSelection = await resolveNode(programs.node);
         if (nodeSelection.variant) {
           const cli = request.program === "npm" ? nodeSelection.variant.npmCli : nodeSelection.variant.npxCli;
-          if (!cli) throw new Error("PROJECT_NPM_UNAVAILABLE");
+          if (!cli) throw new Error(request.program === "npm" ? "PROJECT_NPM_UNAVAILABLE" : "PROJECT_NPX_UNAVAILABLE");
           selectedVariant = nodeSelection.variant;
           selection = { program: { ...nodeSelection.program, logicalName: request.program }, selection: { ...nodeSelection.selection!, logicalName: request.program, adapter: "npm-cli" } };
           args.splice(0, 0, cli);
           childEnvironment = withNodePath(baseEnvironment, nodeSelection.program, platform);
         }
-      } else if (selection.program.logicalName === "node" && selection.program.executable !== definition.executable) childEnvironment = withNodePath(baseEnvironment, selection.program, platform);
+      } else if (selection.variant) childEnvironment = withNodePath(baseEnvironment, selection.program, platform);
+      if (selection.program.argumentSemantics === "cmd-reparsed" && args.some(argument => !cmdScriptArgumentIsSafe(argument))) throw new Error("UNSAFE_CMD_SCRIPT_ARGUMENT");
       if (selectedVariant) await revalidateNodeVariant(selectedVariant, platform);
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }

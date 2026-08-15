@@ -2,7 +2,7 @@ import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { configuredResolutionPlan, createCommandRuntime, effectiveTimeoutMs, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
-import { discoverNodeVariants } from "./node-resolution.js";
+import { discoverNodeVariants, effectiveNodeInstallationRoots } from "./node-resolution.js";
 import { parseManifestProbes } from "./manifest-probes.js";
 import { validateRuntimeLimits } from "./config.js";
 import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
@@ -82,18 +82,21 @@ export async function migrateManifest(input: string, output = `${input}.v2.json`
     executable = await resolveExecutable([candidate], { platform: process.platform, manifestDirectory: dirname(resolve(input)), path, pathExt });
     if (executable) break;
   }
-  const variants = await discoverNodeVariants({ enabled: true, installationRoots: baseResolution.installationRoots as string[] | undefined }, process.env, process.platform);
+  const installationRoots = effectiveNodeInstallationRoots({ installationRoots: baseResolution.installationRoots as string[] | undefined }, process.env, process.platform);
+  const variants = await discoverNodeVariants({ enabled: true, installationRoots }, process.env, process.platform);
   const selected = variants.find(variant => variant.executable === executable);
   if (!selected) throw new Error("MIGRATION_DEFAULT_VERSION_UNAVAILABLE");
   const migratedPlatforms = Object.fromEntries(Object.entries(platforms).map(([name, value]) => { const platform = { ...jsonObject(value) }; delete platform.nodeResolution; return [name, platform]; }));
   const migrated: JsonObject = {
     ...manifest,
     version: 2,
-    projectNode: { installationRoots: baseResolution.installationRoots, enabledRoots: [...roots], defaultVersion: selected.version },
+    projectNode: { installationRoots, enabledRoots: [...roots], defaultVersion: selected.version },
     ...(manifest.platforms === undefined ? {} : { platforms: migratedPlatforms }),
   };
   delete migrated.nodeResolution;
   parseProgramManifest(migrated);
+  const candidate = await createCommandRuntime({ roots: roots.map(root => resolve(root)), manifest: migrated, manifestDirectory: dirname(resolve(output)) });
+  await candidate.close();
   try { await writeFile(output, `${JSON.stringify(migrated, null, 2)}\n`, { encoding: "utf8", flag: "wx" }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`MANIFEST_EXISTS: ${output}`); throw error; }
   return output;

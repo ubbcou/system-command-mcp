@@ -93,7 +93,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (parsed.command === "doctor") { const result = await doctor(parsed.options, parsed.execute, parsed.all); console.error(`doctor: ${result.message}`); return; }
-  if (parsed.command === "migrate-manifest") { const path = await migrateManifest(parsed.inputPath!, parsed.outputPath, parsed.options.roots); console.error(`wrote ${path}`); return; }
+  if (parsed.command === "migrate-manifest") { const path = await migrateManifest(parsed.inputPath!, parsed.outputPath, parsed.options.roots); console.error(`wrote validated candidate ${path}; original ${parsed.inputPath!} remains unchanged for rollback`); return; }
   if (parsed.options.manifestPath && !parsed.options.roots.length) throw new Error("ROOT_REQUIRED");
   const options = { ...parsed.options, roots: parsed.options.roots.length ? parsed.options.roots : [process.cwd()] };
   process.stdout.write(parsed.target === "codex" ? codexSnippet(options) : dshSnippet(options));

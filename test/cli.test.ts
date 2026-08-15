@@ -54,7 +54,7 @@ test("migrate-manifest converts applicable v1 node resolution without overwritin
   const enabledRoot = join(directory, "project");
   const otherPlatform = process.platform === "win32" ? "linux" : "win32";
   try {
-    const nodePath = await installedNode(installationRoot, "22.14.0");
+    const nodePath = await installedNode(installationRoot, "22.14.0"); await mkdir(enabledRoot);
     await writeFile(input, JSON.stringify({
       version: 1,
       searchPath: [directory],
@@ -79,6 +79,15 @@ test("migrate-manifest converts applicable v1 node resolution without overwritin
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("migrate-manifest materializes effective default installation roots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-migrate-defaults-")); const home = join(directory, "home"); const installationRoot = process.platform === "win32" ? join(home, "AppData", "Roaming", "nvm") : join(home, ".nvm", "versions", "node"); const project = join(directory, "project"); const input = join(directory, "manifest.json"); const previousHome = process.env.HOME; const previousProfile = process.env.USERPROFILE;
+  try {
+    if (process.platform === "win32") process.env.USERPROFILE = home; else process.env.HOME = home;
+    const nodePath = await installedNode(installationRoot, "22.2.0"); await mkdir(project); await writeFile(input, JSON.stringify({ version: 1, nodeResolution: { enabled: true }, programs: { node: { candidates: [nodePath], required: true } } }));
+    const output = await migrateManifest(input, undefined, [project]); const migrated = JSON.parse(await readFile(output, "utf8")); assert.ok(migrated.projectNode.installationRoots.includes(installationRoot)); assert.deepEqual(migrated.projectNode.enabledRoots, [project]);
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile; await rm(directory, { recursive: true, force: true }); }
+});
+
 test("migrate-manifest reports applicability, override, and default-version errors", async () => {
   const directory = await mkdtemp(join(tmpdir(), "system-command-migrate-"));
   const input = join(directory, "manifest.json");
@@ -98,12 +107,13 @@ test("migrate-manifest CLI writes the default output", async () => {
   const directory = await mkdtemp(join(tmpdir(), "system-command-migrate-"));
   const input = join(directory, "manifest.json");
   try {
-    const nodePath = await installedNode(directory, "20.11.1");
-    await writeFile(input, JSON.stringify({ version: 1, nodeResolution: { enabled: true, installationRoots: [directory] }, programs: { node: { candidates: [nodePath] } } }));
-    const result = run(["migrate-manifest", input, "--root", directory]);
+    const installationRoot = join(directory, "nodes"); const project = join(directory, "project"); await mkdir(project); const nodePath = await installedNode(installationRoot, "20.11.1");
+    await writeFile(input, JSON.stringify({ version: 1, nodeResolution: { enabled: true, installationRoots: [installationRoot] }, programs: { node: { candidates: [nodePath] } } }));
+    const result = run(["migrate-manifest", input, "--root", project]);
     assert.equal(result.status, 0);
-    assert.match(result.stderr, /wrote .*manifest\.json\.v2\.json/);
+    assert.match(result.stderr, /wrote validated candidate .*manifest\.json\.v2\.json; original .*manifest\.json remains unchanged for rollback/);
     assert.equal((JSON.parse(await readFile(`${input}.v2.json`, "utf8")) as { version: number }).version, 2);
+    assert.equal((JSON.parse(await readFile(input, "utf8")) as { version: number }).version, 1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

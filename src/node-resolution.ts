@@ -42,10 +42,10 @@ export function parseProjectNodeResolution(value: unknown, path: string): Projec
   return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: version(defaultVersion)! };
 }
 
-function roots(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
+export function effectiveNodeInstallationRoots(configuration: Pick<NodeResolution, "installationRoots">, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
   const configured = configuration.installationRoots;
-  if (configured !== undefined) return [...new Set(configured.map(root => root.startsWith("~/") ? resolve(homedir(), root.slice(2)) : resolve(root)))];
-  const home = homedir();
+  const home = platform === "win32" ? environment.USERPROFILE ?? homedir() : environment.HOME ?? homedir();
+  if (configured !== undefined) return [...new Set(configured.map(root => root.startsWith("~/") ? resolve(home, root.slice(2)) : resolve(root)))];
   const defaults = platform === "win32"
     ? [environment.NVM_HOME, join(home, "AppData", "Roaming", "nvm"), join(home, ".volta", "tools", "image", "node")]
     : [join(home, ".nvm", "versions", "node"), join(home, ".volta", "tools", "image", "node"), join(home, ".fnm", "node-versions"), join(home, ".asdf", "installs", "nodejs")];
@@ -126,7 +126,7 @@ export async function revalidateNodeVariant(variant: NodeVariant, platform: Node
 
 export async function discoverNodeVariants(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<readonly NodeVariant[]> {
   if (!configuration.enabled) return [];
-  const variants = (await Promise.all(roots(configuration, environment, platform).map(root => scan(root, platform)))).flat();
+  const variants = (await Promise.all(effectiveNodeInstallationRoots(configuration, environment, platform).map(root => scan(root, platform)))).flat();
   const unique = new Map<string, NodeVariant>();
   for (const item of variants) if (!unique.has(`${item.version}:${item.executable}`)) unique.set(`${item.version}:${item.executable}`, item);
   return Object.freeze([...unique.values()].sort((a, b) => semver.rcompare(a.version, b.version) || a.executable.localeCompare(b.executable)).map(item => Object.freeze({ ...item })));
@@ -240,6 +240,10 @@ export async function projectNodeSelection(cwd: string, root: string, variants: 
 }
 
 export function withNodePath(environment: NodeJS.ProcessEnv, selected: RegisteredProgram, platform: NodeJS.Platform): NodeJS.ProcessEnv {
-  const result = { ...environment }; const key = platform === "win32" ? Object.keys(result).find(name => name.toLowerCase() === "path") ?? "PATH" : "PATH";
-  result[key] = [dirname(selected.executable), result[key]].filter(Boolean).join(platform === "win32" ? ";" : delimiter); return result;
+  const result = { ...environment };
+  if (platform === "win32") {
+    const keys = Object.keys(result).filter(name => name.toLowerCase() === "path"); const value = keys.map(key => result[key]).find(Boolean); for (const key of keys) delete result[key];
+    result.PATH = [dirname(selected.executable), value].filter(Boolean).join(";");
+  } else result.PATH = [dirname(selected.executable), result.PATH].filter(Boolean).join(delimiter);
+  return result;
 }

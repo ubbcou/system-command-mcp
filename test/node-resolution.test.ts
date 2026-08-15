@@ -113,6 +113,29 @@ test("v2 chooses the deepest overlapping enabled root", async () => {
   finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("v2 requires paired npm and npx across every selectable variant", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-pairs-")); await node(root, "v20.1.0"); await node(root, "v22.2.0");
+  try {
+    await rm(join(root, "v20.1.0", "node_modules", "npm", "bin", "npm-cli.js"));
+    await assert.rejects(runtimeV2(root, root, "22.2.0", { node: { candidates: [execPath], required: true }, npm: { candidates: [execPath] } }), /PROJECT_NPM_UNAVAILABLE/);
+    await writeFile(join(root, "v20.1.0", "node_modules", "npm", "bin", "npm-cli.js"), "");
+    await rm(join(root, "v20.1.0", "node_modules", "npm", "bin", "npx-cli.js"));
+    await assert.rejects(runtimeV2(root, root, "22.2.0", { node: { candidates: [execPath], required: true }, npx: { candidates: [execPath] } }), /PROJECT_NPX_UNAVAILABLE/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("paired native npm accepts literal metacharacters and selected fallback prepends PATH", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-literal-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project);
+  const selected = await realpath(join(root, "v22.2.0", "bin", binaryName));
+  const wrapper = join(root, "npm.cmd"); await writeFile(wrapper, ""); if (process.platform !== "win32") await chmod(wrapper, 0o755);
+  const instance = await runtimeV2(root, project, "22.2.0", { node: { candidates: [selected], required: true }, npm: { candidates: [wrapper], required: true } });
+  try {
+    const npm = await instance.execute({ program: "npm", args: ["a&b", "%HOME%"], cwd: project }); assert.equal(npm.stdout.text, `${process.version} a&b,%HOME%\n`);
+    await assert.rejects(instance.execute({ program: "npm", args: ["a&b"], cwd: root }), /UNSAFE_CMD_SCRIPT_ARGUMENT/);
+    const path = await instance.execute({ program: "node", args: ["-e", "process.stdout.write(process.env.PATH ?? process.env.Path ?? '')"], cwd: project }); assert.equal(path.stdout.text.split(process.platform === "win32" ? ";" : ":")[0], dirname(selected));
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("v2 authorizes roots and supports platform override", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-root-")); await node(root, "v22.2.0");
   try {
