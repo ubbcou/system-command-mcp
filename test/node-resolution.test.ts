@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execPath } from "node:process";
@@ -60,6 +60,21 @@ test("npm and npx use the project node pair; missing pair fails", async () => {
   try { const result = await instance.execute({ program: "npm", args: ["one", "two"], cwd: project }); assert.match(result.stdout.text, /v22\.20\.0 one,two/); assert.equal(result.programSelection?.adapter, "npm-cli"); assert.equal(result.programSelection?.executable, join(root, "v22.2.0", "bin", binaryName)); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
   const missing = await mkdtemp(join(tmpdir(), "system-command-mcp-node-npm-missing-")); await node(missing, "v22.2.0", false); const missingProject = join(missing, "project"); await mkdir(missingProject); await writeFile(join(missingProject, ".nvmrc"), "22"); const unavailable = await runtime(missing, { node: { candidates: [execPath], required: true }, npm: { candidates: [execPath], required: true } });
   try { await assert.rejects(unavailable.execute({ program: "npm", cwd: missingProject }), /PROJECT_NPM_UNAVAILABLE/); } finally { await unavailable.close(); await rm(missing, { recursive: true, force: true }); }
+});
+
+test("node resolver revalidates selected variants", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-revalidate-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); await writeFile(join(project, ".nvmrc"), "22"); const instance = await runtime(root);
+  try {
+    const executable = join(root, "v22.2.0", "bin", binaryName); await rename(executable, `${executable}.old`); await cp(execPath, executable); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_VARIANT_CHANGED/);
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+  if (process.platform === "win32") return t.skip("directory symlink fixture needs elevated privilege on this host");
+  const linkedRoot = await mkdtemp(join(tmpdir(), "system-command-mcp-node-revalidate-link-")); await node(linkedRoot, "v22.2.0"); const linkedProject = join(linkedRoot, "project"); await mkdir(linkedProject); await writeFile(join(linkedProject, ".nvmrc"), "22"); const linked = await runtime(linkedRoot);
+  try { const directory = join(linkedRoot, "v22.2.0"); await rename(directory, `${directory}.old`); await symlink(`${directory}.old`, directory); await assert.rejects(linked.execute({ program: "node", cwd: linkedProject }), /NODE_VARIANT_CHANGED/); } finally { await linked.close(); await rm(linkedRoot, { recursive: true, force: true }); }
+});
+
+test("node resolver excludes prereleases from composite stable ranges", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-prerelease-")); await node(root, "v20.1.0"); await node(root, "v20.2.0-beta.1"); const project = join(root, "project"); await mkdir(project); await writeFile(join(project, ".nvmrc"), ">=20 <21"); const instance = await runtime(root);
+  try { const result = await instance.execute({ program: "node", args: ["--version"], cwd: project }); assert.equal(result.programSelection?.version, "20.1.0"); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("node resolver parses strict manifest fields", () => {

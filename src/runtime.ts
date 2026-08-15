@@ -6,7 +6,7 @@ import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
 import { isWithinRoot } from "./path-policy.js";
 import { parseManifestProbes } from "./manifest-probes.js";
-import { discoverNodeVariants, parseNodeResolution, projectNodeSelection, withNodePath, type NodeResolution, type NodeVariant } from "./node-resolution.js";
+import { discoverNodeVariants, parseNodeResolution, projectNodeSelection, revalidateNodeVariant, withNodePath, type NodeResolution, type NodeVariant } from "./node-resolution.js";
 import { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, validateRuntimeLimits } from "./config.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
 
@@ -166,7 +166,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   let closing = false;
   let closePromise: Promise<void> | undefined;
   const active = new Map<Promise<ExecuteResult>, AbortController>();
-  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && nodeResolution?.enabled ? { ...definition, variantSet: { kind: "node-project", variants: nodeVariants.map(item => ({ ...item })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
+  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && nodeResolution?.enabled ? { ...definition, variantSet: { kind: "node-project", variants: nodeVariants.map(({ version, executable, npmCli, npxCli }) => ({ version, executable, npmCli, npxCli })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
   return { async inspectEnvironment() { return snapshot(); }, execute(request) {
     if (closing) return Promise.reject(new Error("RUNTIME_CLOSING"));
     if (active.size >= maxConcurrentExecutions) return Promise.reject(new Error("CONCURRENCY_LIMIT"));
@@ -187,17 +187,20 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       if (!roots.some(root => isWithinRoot(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
       const baseEnvironment = plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
       let selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, definition) : { program: definition };
+      let selectedVariant = selection.variant;
       let childEnvironment: NodeJS.ProcessEnv = baseEnvironment;
       if ((request.program === "npm" || request.program === "npx") && nodeResolution?.enabled && programs.node) {
         const nodeSelection = await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, programs.node);
         if (nodeSelection.variant) {
           const cli = request.program === "npm" ? nodeSelection.variant.npmCli : nodeSelection.variant.npxCli;
           if (!cli) throw new Error("PROJECT_NPM_UNAVAILABLE");
+          selectedVariant = nodeSelection.variant;
           selection = { program: { ...nodeSelection.program, logicalName: request.program }, selection: { ...nodeSelection.selection!, logicalName: request.program, adapter: "npm-cli" } };
           args.splice(0, 0, cli);
           childEnvironment = withNodePath(baseEnvironment, nodeSelection.program, platform);
         }
       } else if (selection.program.logicalName === "node" && selection.program.executable !== definition.executable) childEnvironment = withNodePath(baseEnvironment, selection.program, platform);
+      if (selectedVariant) await revalidateNodeVariant(selectedVariant, platform);
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
       const result = await executeProgram({ program: selection.program, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });

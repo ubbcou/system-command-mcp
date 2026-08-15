@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { access, lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import semver from "semver";
@@ -9,7 +9,8 @@ import type { ProgramSelection, RegisteredProgram } from "./types.js";
 const PACKAGE_LIMIT = 1024 * 1024;
 const VERSION_FILE_LIMIT = 4096;
 export interface NodeResolution { enabled: boolean; installationRoots?: string[]; }
-export interface NodeVariant { version: string; executable: string; npmCli?: string; npxCli?: string; }
+type NodeIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint };
+export interface NodeVariant { version: string; versionDirectory: string; versionDirectoryIdentity: NodeIdentity; executable: string; executableIdentity: NodeIdentity; npmCli?: string; npmCliIdentity?: NodeIdentity; npxCli?: string; npxCliIdentity?: NodeIdentity; }
 export interface NodeSelection { program: RegisteredProgram; selection?: ProgramSelection; variant?: NodeVariant; }
 
 const version = (value: string): string | undefined => semver.valid(value.trim().replace(/^v/, "")) ?? undefined;
@@ -54,8 +55,21 @@ function layoutVersion(root: string, executablePath: string, platform: NodeJS.Pl
   return found ? { version: found, directory: join(root, segments[0]!) } : undefined;
 }
 
-async function pairedCli(variantDirectory: string, name: "npm" | "npx", platform: NodeJS.Platform): Promise<string | undefined> {
-  return regularRealpath(join(variantDirectory, "node_modules", "npm", "bin", `${name}-cli.js`), variantDirectory, platform);
+function identity(info: import("node:fs").BigIntStats): NodeIdentity { return { dev: info.dev, ino: info.ino, size: info.size, mtimeNs: info.mtimeNs }; }
+function sameIdentity(left: NodeIdentity, right: NodeIdentity): boolean { return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs; }
+
+async function trustedFile(path: string, directory: string, platform: NodeJS.Platform, executable = false): Promise<{ path: string; identity: NodeIdentity } | undefined> {
+  try {
+    const link = await lstat(path, { bigint: true }); if (!link.isFile() || link.isSymbolicLink()) return undefined;
+    if (executable) await access(path, platform === "win32" ? constants.F_OK : constants.X_OK);
+    const actual = await realpath(path); if (!isWithinRoot(directory, actual) || actual !== path) return undefined;
+    const info = await stat(path, { bigint: true }); if (!info.isFile() || !sameIdentity(identity(link), identity(info))) return undefined;
+    return { path: actual, identity: identity(info) };
+  } catch { return undefined; }
+}
+
+async function pairedCli(variantDirectory: string, name: "npm" | "npx", platform: NodeJS.Platform): Promise<{ path: string; identity: NodeIdentity } | undefined> {
+  return trustedFile(join(variantDirectory, "node_modules", "npm", "bin", `${name}-cli.js`), variantDirectory, platform);
 }
 
 async function scan(root: string, platform: NodeJS.Platform): Promise<NodeVariant[]> {
@@ -63,19 +77,35 @@ async function scan(root: string, platform: NodeJS.Platform): Promise<NodeVarian
   let entries: import("node:fs").Dirent[]; try { entries = await readdir(canonicalRoot, { withFileTypes: true }); } catch { return []; }
   const found: NodeVariant[] = [];
   for (const entry of entries) {
-    // Manager version directories are the trust boundary; do not follow directory links.
-    if (!entry.isDirectory() || !version(entry.name)) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !version(entry.name)) continue;
     const directory = join(canonicalRoot, entry.name);
+    let directoryInfo: import("node:fs").BigIntStats; try { directoryInfo = await lstat(directory, { bigint: true }); } catch { continue; }
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || await realpath(directory) !== directory || !isWithinRoot(canonicalRoot, directory)) continue;
+    const directoryIdentity = identity(directoryInfo);
     const candidates = [join(directory, "bin", binaryName(platform)), join(directory, "installation", "bin", binaryName(platform))];
     if (platform === "win32") candidates.push(join(directory, binaryName(platform)));
     for (const candidate of candidates) {
       const layout = layoutVersion(canonicalRoot, candidate, platform); if (!layout) continue;
-      const actual = await regularRealpath(candidate, canonicalRoot, platform, true); if (!actual) continue;
-      found.push({ version: layout.version, executable: actual, npmCli: await pairedCli(layout.directory, "npm", platform), npxCli: await pairedCli(layout.directory, "npx", platform) });
+      const executable = await trustedFile(candidate, directory, platform, true); if (!executable) continue;
+      const npmCli = await pairedCli(directory, "npm", platform); const npxCli = await pairedCli(directory, "npx", platform);
+      let after: import("node:fs").BigIntStats; try { after = await lstat(directory, { bigint: true }); } catch { continue; }
+      if (!after.isDirectory() || after.isSymbolicLink() || await realpath(directory) !== directory || !sameIdentity(directoryIdentity, identity(after))) continue;
+      found.push({ version: layout.version, versionDirectory: directory, versionDirectoryIdentity: directoryIdentity, executable: executable.path, executableIdentity: executable.identity, npmCli: npmCli?.path, npmCliIdentity: npmCli?.identity, npxCli: npxCli?.path, npxCliIdentity: npxCli?.identity });
       break;
     }
   }
   return found;
+}
+
+export async function revalidateNodeVariant(variant: NodeVariant, platform: NodeJS.Platform): Promise<void> {
+  try {
+    const directory = await lstat(variant.versionDirectory, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink() || await realpath(variant.versionDirectory) !== variant.versionDirectory || !sameIdentity(variant.versionDirectoryIdentity, identity(directory))) throw new Error();
+    for (const [path, expected] of [[variant.executable, variant.executableIdentity], [variant.npmCli, variant.npmCliIdentity], [variant.npxCli, variant.npxCliIdentity]] as const) {
+      if (!path || !expected) continue;
+      const file = await lstat(path, { bigint: true }); if (!file.isFile() || file.isSymbolicLink() || await realpath(path) !== path || !sameIdentity(expected, identity(file))) throw new Error();
+    }
+  } catch { throw new Error("NODE_VARIANT_CHANGED"); }
 }
 
 export async function discoverNodeVariants(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<readonly NodeVariant[]> {
@@ -145,7 +175,7 @@ export async function projectNodeSelection(cwd: string, root: string, variants: 
     if (found) {
       const requirement = found.requirement.trim();
       if (["lts/*", "node", "stable"].includes(requirement.toLowerCase()) || !semver.validRange(requirement)) requirementError(found.source);
-      const selected = variants.find(item => semver.satisfies(item.version, requirement, { includePrerelease: /-/.test(requirement) }));
+      const selected = variants.find(item => semver.satisfies(item.version, requirement));
       if (!selected) throw new Error(`NODE_VERSION_UNAVAILABLE: ${found.source}`);
       return { program: { ...fallback, executable: selected.executable, kind: "native", argumentSemantics: "literal" }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement, source: found.source } };
     }
