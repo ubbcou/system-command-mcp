@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { configuredResolutionPlan, createCommandRuntime, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
 import { parseManifestProbes } from "./manifest-probes.js";
+import { validateRuntimeLimits } from "./config.js";
 import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
 
 export const EXIT = { unusable: 1, usage: 2 } as const;
@@ -17,6 +18,7 @@ export interface ManagementOptions {
   maxOutputBytes?: number;
   inlineHeadBytes?: number;
   defaultTimeoutMs?: number;
+  maxConcurrentExecutions?: number;
 }
 
 export const MANIFEST_TEMPLATE = `{
@@ -63,7 +65,7 @@ export function runtimeOptions(options: ManagementOptions, manifest: unknown): C
     artifactDirectory: options.artifactDirectory, artifactRetentionMs: options.artifactRetentionMs,
     artifactQuotaBytes: options.artifactQuotaBytes, artifactMaxStreamBytes: options.artifactMaxStreamBytes,
     maxOutputBytes: options.maxOutputBytes, inlineHeadBytes: options.inlineHeadBytes,
-    defaultTimeoutMs: options.defaultTimeoutMs,
+    defaultTimeoutMs: options.defaultTimeoutMs, maxConcurrentExecutions: options.maxConcurrentExecutions,
   };
 }
 
@@ -71,6 +73,7 @@ const inside = (root: string, candidate: string): boolean => { const child = rel
 
 export async function doctor(options: ManagementOptions, execute = false, all = false): Promise<{ ok: boolean; message: string }> {
   if (!options.manifestPath) throw new Error("MANIFEST_REQUIRED");
+  validateRuntimeLimits(options);
   const rawManifest = await validatedManifest(options.manifestPath);
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
   for (const root of options.roots) { try { if (!(await stat(root)).isDirectory()) throw new Error(); } catch { throw new Error(`ROOT_NOT_DIRECTORY: ${root}`); } }
@@ -93,7 +96,10 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
       const matches = await resolveExecutableMatches(program.candidates, { path, pathExt, manifestDirectory: options.manifestPath && dirname(resolve(options.manifestPath)) });
       return matches.length > 1 ? `${name}: winner ${matches[0]}; shadowed ${matches.slice(1).join(", ")}` : undefined;
     }))).filter((value): value is string => value !== undefined);
-    const diagnostic = `${winners || "none"}${shadows.length ? `; shadows: ${shadows.join(" | ")}` : ""}`;
+    const optionalWarnings = Object.entries(manifest.programs)
+      .filter(([name, program]) => program.enabled !== false && !program.required && !environment.programs[name])
+      .map(([name, program]) => `optional-unavailable: ${name} (candidates: ${program.candidates.join(", ")})`);
+    const diagnostic = `${winners || "none"}${shadows.length ? `; shadows: ${shadows.join(" | ")}` : ""}${optionalWarnings.length ? `; warnings: ${optionalWarnings.join(" | ")}` : ""}`;
     if (!execute) return { ok: true, message: `static configuration is valid (no programs executed; winners: ${diagnostic})` };
     const probes = Object.entries(declaredProbes).filter(([name]) => all || manifest.programs[name]?.required);
     for (const [name, probe] of probes) {
@@ -109,11 +115,12 @@ function quoteToml(value: string): string { return JSON.stringify(value); }
 function quoteYaml(value: string): string { return JSON.stringify(value); }
 function entryPath(): string { return resolve(process.argv[1] ?? "system-command-mcp"); }
 function configArgs(options: ManagementOptions): string[] {
+  validateRuntimeLimits(options);
   const args = [entryPath(), "serve"];
   if (options.manifestPath) args.push("--manifest", resolve(options.manifestPath));
   for (const root of options.roots) args.push("--root", resolve(root));
   if (options.artifactDirectory) args.push("--artifact-dir", resolve(options.artifactDirectory));
-  for (const [flag, value] of [["--artifact-retention-ms", options.artifactRetentionMs], ["--artifact-quota-bytes", options.artifactQuotaBytes], ["--artifact-max-stream-bytes", options.artifactMaxStreamBytes], ["--max-output-bytes", options.maxOutputBytes], ["--inline-head-bytes", options.inlineHeadBytes], ["--default-timeout-ms", options.defaultTimeoutMs]] as const) if (value !== undefined) args.push(flag, String(value));
+  for (const [flag, value] of [["--artifact-retention-ms", options.artifactRetentionMs], ["--artifact-quota-bytes", options.artifactQuotaBytes], ["--artifact-max-stream-bytes", options.artifactMaxStreamBytes], ["--max-output-bytes", options.maxOutputBytes], ["--inline-head-bytes", options.inlineHeadBytes], ["--default-timeout-ms", options.defaultTimeoutMs], ["--max-concurrent-executions", options.maxConcurrentExecutions]] as const) if (value !== undefined) args.push(flag, String(value));
   return args;
 }
 

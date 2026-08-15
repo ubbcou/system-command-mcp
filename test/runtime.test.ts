@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
 import { cmdScriptArgumentIsSafe, createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
+import { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_ARTIFACT_STREAM_BYTES, MAX_OUTPUT_BYTES } from "../src/config.js";
 
 const root = process.cwd();
 
@@ -234,6 +235,11 @@ test("Command Runtime authorizes roots, bounded arguments, and opt-in stdin", as
     assert.equal(result.stdout.text, "input");
     await assert.rejects(runtime.execute({ program: "node", args: ["bad\0arg"], cwd: root, timeoutMs: 1_000 }), /INVALID_ARGUMENT/);
   } finally { await runtime.close(); }
+});
+
+test("Command Runtime validates shared hard limits and defaults concurrency to four", async () => {
+  assert.equal(DEFAULT_MAX_CONCURRENT_EXECUTIONS, 4);
+  for (const options of [{ maxOutputBytes: MAX_OUTPUT_BYTES + 1 }, { inlineHeadBytes: 2, maxOutputBytes: 1 }, { artifactMaxStreamBytes: MAX_ARTIFACT_STREAM_BYTES + 1 }]) await assert.rejects(createCommandRuntime({ roots: [root], ...options }), /INVALID_RUNTIME_CONFIG/);
 });
 
 test("Command Runtime bounds concurrency and close cancels active executions", async () => {

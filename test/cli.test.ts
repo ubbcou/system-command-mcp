@@ -15,7 +15,7 @@ const manifest = (programs: Record<string, unknown>, probes?: Record<string, unk
 
 test("CLI parses commands and reports invocation failures as typed usage errors", () => {
   assert.equal(parseCli(["serve", "--root", ".", "--root", ".."]).command, "serve");
-  assert.equal(parseCli(["doctor", "--execute", "--all", "--manifest", "manifest.json"]).all, true);
+  assert.equal(parseCli(["doctor", "--execute", "--all", "--manifest", "manifest.json", "--root", "."]).all, true);
   assert.throws(() => parseCli(["doctor", "--all"]), CliUsageError);
   assert.throws(() => parseCli(["bogus"]), CliUsageError);
   assert.throws(() => parseCli(["serve", "--default-timeout-ms", "0"]), CliUsageError);
@@ -23,11 +23,17 @@ test("CLI parses commands and reports invocation failures as typed usage errors"
   assert.equal(run(["doctor"]).status, 2);
   assert.equal(run(["serve", "--unknown"]).status, 2);
   assert.equal(run(["serve", "--manifest", "missing.json"]).status, 2);
+  assert.equal(run(["doctor", "--manifest", "missing.json"]).status, 2);
+  assert.equal(run(["print-config", "dsh", "--manifest", "missing.json"]).status, 2);
+  const invalidBounds: [string, string][] = [["--default-timeout-ms", "600001"], ["--max-output-bytes", String(8 * 1024 * 1024 + 1)], ["--inline-head-bytes", "2"], ["--artifact-max-stream-bytes", String(100 * 1024 * 1024 + 1)], ["--artifact-retention-ms", String(24 * 60 * 60 * 1000 + 1)], ["--artifact-quota-bytes", String(1024 * 1024 * 1024 + 1)], ["--max-concurrent-executions", "1025"]];
+  for (const [flag, value] of invalidBounds) assert.throws(() => parseCli(["serve", "--root", process.cwd(), "--max-output-bytes", "1", flag, value]), CliUsageError);
+  assert.equal(parseCli(["serve", "--root", process.cwd(), "--max-concurrent-executions", "4"]).options.maxConcurrentExecutions, 4);
+  assert.throws(() => parseCli(["serve", "--root", process.cwd(), "--inline-head-bytes", "2", "--max-output-bytes", "1"]), CliUsageError);
   const invalid = run(["serve", "--manifest", "missing.json", "--root", process.cwd()]);
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /MANIFEST_READ_FAILED/);
   const configured = run(["print-config", "dsh", "--manifest", "missing.json"]);
-  assert.equal(configured.status, 1);
+  assert.equal(configured.status, 2);
   assert.match(configured.stderr, /ROOT_REQUIRED/);
 });
 
@@ -73,6 +79,24 @@ test("probe declarations are strict runtime manifest fields and multi-root probe
   } finally { await rm(directory, { recursive: true, force: true }); await rm(other, { recursive: true, force: true }); }
 });
 
+test("doctor reports unavailable optional Programs without making configuration unusable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-cli-")); const path = join(directory, "manifest.json");
+  try {
+    await writeFile(path, manifest({ node: { candidates: [process.execPath], required: true }, unavailable: { candidates: ["definitely-missing-a", "definitely-missing-b"], required: false } }));
+    const result = run(["doctor", "--manifest", path, "--root", directory]);
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /optional-unavailable: unavailable \(candidates: definitely-missing-a, definitely-missing-b\)/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("doctor rejects invalid supplied runtime configuration with unusable exit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-cli-")); const path = join(directory, "manifest.json");
+  try {
+    await writeFile(path, manifest({ node: { candidates: [process.execPath], required: true } }));
+    await assert.rejects(doctor({ manifestPath: path, roots: [directory], maxOutputBytes: 1, inlineHeadBytes: 2 }), /INVALID_RUNTIME_CONFIG/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("doctor shadows use the program's effective environment layer", async () => {
   const first = await mkdtemp(join(tmpdir(), "system-command-path-")); const second = await mkdtemp(join(tmpdir(), "system-command-path-")); const path = join(first, "manifest.json");
   try {
@@ -86,7 +110,7 @@ test("doctor shadows use the program's effective environment layer", async () =>
 });
 
 test("configuration snippets preserve every serve execution option", () => {
-  const options = { roots: ["C:\\work dir\\quoted\\\"root", "C:\\second root"], manifestPath: "C:\\configs\\manifest.json", artifactDirectory: "C:\\artifacts", artifactRetentionMs: 1, artifactQuotaBytes: 2, artifactMaxStreamBytes: 3, maxOutputBytes: 4, inlineHeadBytes: 5, defaultTimeoutMs: 6 };
+  const options = { roots: ["C:\\work dir\\quoted\\\"root", "C:\\second root"], manifestPath: "C:\\configs\\manifest.json", artifactDirectory: "C:\\artifacts", artifactRetentionMs: 1, artifactQuotaBytes: 2, artifactMaxStreamBytes: 3, maxOutputBytes: 5, inlineHeadBytes: 5, defaultTimeoutMs: 6, maxConcurrentExecutions: 4 };
   const parsed = parseCli((JSON.parse(`[${codexSnippet(options).match(/args = \[(.*)\]/)![1]}]`) as string[]).slice(1));
   assert.deepEqual(parsed.options, { ...options, roots: options.roots.map(root => join(root)), manifestPath: join(options.manifestPath), artifactDirectory: join(options.artifactDirectory) });
   const dshArgs = [...dshSnippet(options).matchAll(/^      - (".*")$/gm)].map(match => JSON.parse(match[1]!));

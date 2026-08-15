@@ -5,6 +5,7 @@ import { ArtifactStore, type ArtifactPolicy, type ArtifactStatus, type OutputEnc
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
 import { parseManifestProbes } from "./manifest-probes.js";
+import { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, validateRuntimeLimits } from "./config.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
 
 export interface ProgramPolicy { defaultTimeoutMs?: number; maxTimeoutMs?: number; allowStdin?: boolean; gracePeriodMs?: number; finalTerminationWaitMs?: number; artifactPolicy?: ArtifactPolicy; }
@@ -18,8 +19,6 @@ export interface ExecutionRequest { program: string; args?: readonly string[]; c
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult & { artifact: ArtifactStatus }>; readOutput(id: string, stream: OutputStream, offset: number, limit: number, encoding: OutputEncoding): Promise<OutputPage>; close(): Promise<void>; }
 export interface CommandRuntimeOptions { roots: readonly string[]; manifest?: unknown; manifestPath?: string; manifestDirectory?: string; environment?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; defaultTimeoutMs?: number; gracePeriodMs?: number; finalTerminationWaitMs?: number; closeDeadlineMs?: number; maxOutputBytes?: number; inlineHeadBytes?: number; maxConcurrentExecutions?: number; artifactDirectory?: string; artifactRetentionMs?: number; artifactQuotaBytes?: number; artifactMaxStreamBytes?: number; }
 
-const MAX_TIMEOUT = 600_000;
-const MAX_CONCURRENT_EXECUTIONS = 1_024;
 const MAX_ARGS = 4_096;
 const MAX_ARG_BYTES = 64 * 1024;
 const MAX_ARG_TOTAL_BYTES = 256 * 1024;
@@ -46,7 +45,7 @@ function layer(value: unknown, path: string): EnvironmentLayer | undefined {
 function policy(value: unknown, path: string): ProgramPolicy | undefined {
   if (value === undefined) return undefined;
   const result = object(value, path); unknownFields(result, ["defaultTimeoutMs", "maxTimeoutMs", "allowStdin", "gracePeriodMs", "finalTerminationWaitMs", "artifactPolicy"], path);
-  for (const name of ["defaultTimeoutMs", "maxTimeoutMs"] as const) if (result[name] !== undefined && (!Number.isInteger(result[name]) || (result[name] as number) <= 0 || (result[name] as number) > MAX_TIMEOUT)) throw new Error(`INVALID_MANIFEST: ${path}.${name}`);
+  for (const name of ["defaultTimeoutMs", "maxTimeoutMs"] as const) if (result[name] !== undefined && (!Number.isInteger(result[name]) || (result[name] as number) <= 0 || (result[name] as number) > MAX_DEFAULT_TIMEOUT_MS)) throw new Error(`INVALID_MANIFEST: ${path}.${name}`);
   for (const name of ["gracePeriodMs", "finalTerminationWaitMs"] as const) if (result[name] !== undefined && (!Number.isInteger(result[name]) || (result[name] as number) <= 0 || (result[name] as number) > MAX_TERMINATION_WAIT)) throw new Error(`INVALID_MANIFEST: ${path}.${name}`);
   if (result.allowStdin !== undefined && typeof result.allowStdin !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.allowStdin`);
   if (result.artifactPolicy !== undefined && !["never", "on-truncation", "always"].includes(result.artifactPolicy as string)) throw new Error(`INVALID_MANIFEST: ${path}.artifactPolicy`);
@@ -124,8 +123,8 @@ export function configuredResolutionPlan(value: unknown, input: NodeJS.ProcessEn
 
 export async function createCommandRuntime(options: CommandRuntimeOptions): Promise<CommandRuntime> {
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
-  const maxConcurrentExecutions = options.maxConcurrentExecutions ?? 8;
-  if (!Number.isInteger(maxConcurrentExecutions) || maxConcurrentExecutions <= 0 || maxConcurrentExecutions > MAX_CONCURRENT_EXECUTIONS) throw new Error("INVALID_CONCURRENCY_LIMIT");
+  validateRuntimeLimits(options);
+  const maxConcurrentExecutions = options.maxConcurrentExecutions ?? DEFAULT_MAX_CONCURRENT_EXECUTIONS;
   const platform = options.platform ?? process.platform;
   const physicalRoots = [...new Set(await Promise.all(options.roots.map(async root => { const physical = await realpath(root); if (!(await stat(physical)).isDirectory()) throw new Error("ROOT_NOT_DIRECTORY"); return physical; })))];
   const roots = physicalRoots.filter(root => !physicalRoots.some(other => other !== root && isInside(other, root)));
@@ -171,7 +170,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       const args = request.args ?? []; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
       if (definition.kind === "cmd-script" && args.some(argument => !cmdScriptArgumentIsSafe(argument))) throw new Error("UNSAFE_CMD_SCRIPT_ARGUMENT");
       try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
-      const policy = policies[request.program] ?? {}; const timeoutMs = request.timeoutMs ?? policy.defaultTimeoutMs ?? options.defaultTimeoutMs ?? 30_000; if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_TIMEOUT, MAX_TIMEOUT)) throw new Error("INVALID_TIMEOUT");
+      const policy = policies[request.program] ?? {}; const timeoutMs = request.timeoutMs ?? policy.defaultTimeoutMs ?? options.defaultTimeoutMs ?? 30_000; if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_DEFAULT_TIMEOUT_MS, MAX_DEFAULT_TIMEOUT_MS)) throw new Error("INVALID_TIMEOUT");
       if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
       if (roots.length > 1 && (request.cwd === undefined || !isAbsolute(request.cwd))) throw new Error("CWD_NOT_ALLOWED");
       const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd;

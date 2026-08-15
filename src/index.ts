@@ -2,6 +2,7 @@ export { createServer } from "./server.js";
 export { executeProgram } from "./execute.js";
 export { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
 export { createCommandRuntime, parseProgramManifest } from "./runtime.js";
+export { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_ARTIFACT_QUOTA_BYTES, MAX_ARTIFACT_RETENTION_MS, MAX_ARTIFACT_STREAM_BYTES, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, MAX_OUTPUT_BYTES, validateRuntimeLimits } from "./config.js";
 export { codexSnippet, discoveredManifest, dshSnippet, doctor, readManifest, writeManifestTemplate } from "./management.js";
 export { parseManifestProbes } from "./manifest-probes.js";
 export type { ManifestProbe } from "./manifest-probes.js";

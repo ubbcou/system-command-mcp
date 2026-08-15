@@ -5,12 +5,13 @@ import { pathToFileURL } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { codexSnippet, discoveredManifest, doctor, dshSnippet, EXIT, readManifest, runtimeOptions, writeManifestTemplate, type ManagementOptions } from "./management.js";
 import { createServer } from "./server.js";
+import { MAX_ARTIFACT_QUOTA_BYTES, MAX_ARTIFACT_RETENTION_MS, MAX_ARTIFACT_STREAM_BYTES, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, MAX_OUTPUT_BYTES, validateRuntimeLimits } from "./config.js";
 
 type Command = "serve" | "init" | "doctor" | "print-config";
 interface Parsed { command: Command; target?: "codex" | "dsh"; options: ManagementOptions; execute: boolean; all: boolean; force: boolean; yes: boolean; initPath?: string; legacy: boolean; }
 export class CliUsageError extends Error { }
 
-function integer(value: string, name: string): number { const result = Number(value); if (!Number.isSafeInteger(result) || result <= 0) throw new CliUsageError(`INVALID_OPTION: ${name}`); return result; }
+function integer(value: string, name: string, maximum = Number.MAX_SAFE_INTEGER): number { const result = Number(value); if (!Number.isSafeInteger(result) || result <= 0 || result > maximum) throw new CliUsageError(`INVALID_OPTION: ${name}`); return result; }
 function requireValue(argv: readonly string[], index: number, flag: string): string { const value = argv[index + 1]; if (!value || value.startsWith("--")) throw new CliUsageError(`${flag} requires a value`); return value; }
 
 export function parseCli(argv: readonly string[]): Parsed {
@@ -34,15 +35,18 @@ export function parseCli(argv: readonly string[]): Parsed {
     if (flag === "--manifest") options.manifestPath = resolve(value);
     else if (flag === "--root") options.roots.push(resolve(value));
     else if (flag === "--artifact-dir") options.artifactDirectory = resolve(value);
-    else if (flag === "--artifact-retention-ms") options.artifactRetentionMs = integer(value, flag);
-    else if (flag === "--artifact-quota-bytes") options.artifactQuotaBytes = integer(value, flag);
-    else if (flag === "--artifact-max-stream-bytes") options.artifactMaxStreamBytes = integer(value, flag);
-    else if (flag === "--max-output-bytes") options.maxOutputBytes = integer(value, flag);
-    else if (flag === "--inline-head-bytes") options.inlineHeadBytes = integer(value, flag);
-    else if (flag === "--default-timeout-ms") options.defaultTimeoutMs = integer(value, flag);
+    else if (flag === "--artifact-retention-ms") options.artifactRetentionMs = integer(value, flag, MAX_ARTIFACT_RETENTION_MS);
+    else if (flag === "--artifact-quota-bytes") options.artifactQuotaBytes = integer(value, flag, MAX_ARTIFACT_QUOTA_BYTES);
+    else if (flag === "--artifact-max-stream-bytes") options.artifactMaxStreamBytes = integer(value, flag, MAX_ARTIFACT_STREAM_BYTES);
+    else if (flag === "--max-output-bytes") options.maxOutputBytes = integer(value, flag, MAX_OUTPUT_BYTES);
+    else if (flag === "--inline-head-bytes") options.inlineHeadBytes = integer(value, flag, MAX_OUTPUT_BYTES);
+    else if (flag === "--default-timeout-ms") options.defaultTimeoutMs = integer(value, flag, MAX_DEFAULT_TIMEOUT_MS);
+    else if (flag === "--max-concurrent-executions") options.maxConcurrentExecutions = integer(value, flag, MAX_CONCURRENT_EXECUTIONS);
     else throw new CliUsageError(`UNKNOWN_OPTION: ${flag}`);
   }
   if (all && !execute) throw new CliUsageError("--all requires --execute");
+  try { validateRuntimeLimits(options); } catch { throw new CliUsageError("INVALID_RUNTIME_CONFIG"); }
+  if ((command === "doctor" || command === "print-config") && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
   if (command === "doctor" && !options.manifestPath) throw new CliUsageError("MANIFEST_REQUIRED");
   if (command === "serve" && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
   return { command, target, options, execute, all, force, yes, initPath, legacy };

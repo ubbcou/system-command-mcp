@@ -77,7 +77,7 @@ Manifest Schema 和示例分别为 `system-command-manifest.schema.json`、`syst
 
 - 仅支持 stdio transport；不支持 Shell 命令字符串、管道、重定向、展开、命令替换或其他 Shell 组合。需要这些语义时，使用宿主 Shell；读写和枚举文件时，使用宿主文件系统工具。
 - 执行是有限且非交互式的：不支持 TTY、后台任务或常驻进程。进程成功启动后的非零退出、超时和取消均返回结构化 Execution Result，而不是 MCP 工具错误。
-- 默认超时为 30 秒。`stdout` 和 `stderr` 分别保留最多 1 MiB 的 UTF-8 诊断投影：未截断时保留完整内容；截断时保留头部和尾部，并报告省略的字节数。完整流可按 Program Policy 作为 Execution Artifact 保存：`never` 不请求、`on-truncation`（默认）仅在任一流截断时发布、`always` 每次发布。Artifact 可能因存储不可用、配额或流大小上限而不可用，并受保留期和配额清理；只能在执行完成后通过 `system_output` 和不透明 id 读取。
+- 默认超时为 30 秒，最多 600 秒；默认最多四个并发执行（可用 `--max-concurrent-executions` 设置）。`stdout` 和 `stderr` 分别保留最多 1 MiB 的 UTF-8 诊断投影，总量硬上限为 8 MiB，`--inline-head-bytes` 必须为正且不超过 `--max-output-bytes`：未截断时保留完整内容；截断时保留头部和尾部，并报告省略的字节数。完整流可按 Program Policy 作为 Execution Artifact 保存：`never` 不请求、`on-truncation`（默认）仅在任一流截断时发布、`always` 每次发布。Artifact 可能因存储不可用、配额或流大小上限（每流最多 100 MiB）而不可用，并受保留期和配额清理；只能在执行完成后通过 `system_output` 和不透明 id 读取。
 - cwd 必须在授权的 `--root` 内；多个 Root 时 cwd 必须为授权树内的绝对路径。Root 只验证进程从哪里启动，**不是**文件系统沙箱，也不限制已启动程序可访问的文件。
 - 程序和执行环境在启动时生成快照；自动发现环境或 Manifest 配置的变化都需要重启 Server 才会生效。
 - 超时、取消和 Server 关闭会尝试终止整个 Process Tree，并在结构化 `termination` 字段中报告结果。Unix 使用进程组，后代若另建 session 或进程组会逃逸；Windows 使用每请求 Job Object（禁止 breakaway），但进程创建到加入 Job Object 之间存在无法验证的竞态，早期后代可能逃逸。Windows 无通用的优雅树终止，因此会立即强制终止；任务管理器回退路径也无法确认完整清理。始终检查 `termination.treeCleaned` 和诊断信息，不要把终止请求当作完整树清理的保证。
