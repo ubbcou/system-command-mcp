@@ -52,42 +52,32 @@ async function windowsPath(path: string): Promise<string | undefined> {
   }
 }
 
-export async function resolveExecutable(
+export async function resolveExecutableMatches(
   candidates: readonly string[],
   options: Pick<RegistryOptions, "path" | "pathExt" | "platform" | "manifestDirectory"> = {},
-): Promise<string | undefined> {
+): Promise<string[]> {
   const platform = options.platform ?? process.platform;
   const pathDelimiter = platform === "win32" ? ";" : ":";
   const directories = (options.path ?? process.env.PATH ?? "").split(pathDelimiter).filter(Boolean);
   const extensions = executableExtensions(platform, options.pathExt);
-
+  const matches: string[] = [];
   for (const candidate of candidates) {
     const manifestRelative = candidate.startsWith("./") || candidate.startsWith("../");
     if (manifestRelative && !options.manifestDirectory) throw new Error("MANIFEST_DIRECTORY_REQUIRED");
     const file = candidate.startsWith("~/") ? resolve(homedir(), candidate.slice(2)) : manifestRelative ? resolve(options.manifestDirectory!, candidate) : candidate;
-    if (isAbsolute(file) || manifestRelative) {
-      const resolved = await resolvedExecutable(file, platform);
-      if (resolved) return resolved;
-      continue;
-    }
-    for (const directory of directories) {
-      if (platform === "win32" && extname(file)) {
-        const resolved = await resolvedExecutable(join(directory, file), platform);
-        if (resolved) return resolved;
-        continue;
-      }
-      for (const extension of extensions) {
-        const path = join(directory, platform === "win32" ? file + extension : file);
-        const actual = platform === "win32" ? await windowsPath(path) : path;
-        if (actual) {
-          const resolved = await resolvedExecutable(actual, platform);
-          if (resolved) return resolved;
-        }
-      }
+    const locations = isAbsolute(file) || manifestRelative ? [file] : directories.flatMap(directory => platform === "win32" && !extname(file) ? extensions.map(extension => join(directory, file + extension)) : [join(directory, file)]);
+    for (const location of locations) {
+      const actual = platform === "win32" ? await windowsPath(location) : location;
+      if (actual) { const resolved = await resolvedExecutable(actual, platform); if (resolved && !matches.includes(resolved)) matches.push(resolved); }
     }
   }
-  return undefined;
+  return matches;
 }
+
+export async function resolveExecutable(
+  candidates: readonly string[],
+  options: Pick<RegistryOptions, "path" | "pathExt" | "platform" | "manifestDirectory"> = {},
+): Promise<string | undefined> { return (await resolveExecutableMatches(candidates, options))[0]; }
 
 export async function inspectEnvironment(options: RegistryOptions): Promise<EnvironmentSnapshot> {
   const platform = options.platform ?? process.platform;

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "System Command MCP Program Manifest v1",
+  "type": "object",
+  "required": ["version", "programs"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "searchPath": { "$ref": "#/$defs/strings" },
+    "pathExt": { "type": "string" },
+    "allowInheritedPath": { "type": "boolean" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "programs": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/program" } },
+    "platforms": { "type": "object", "additionalProperties": { "$ref": "#/$defs/platform" } },
+    "probes": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/probe" } }
+  },
+  "$defs": {
+    "strings": { "type": "array", "items": { "type": "string" } },
+    "environmentValue": { "oneOf": [{ "type": "string" }, { "type": "object", "additionalProperties": false, "required": ["fromEnvironment"], "properties": { "fromEnvironment": { "type": "string" }, "required": { "type": "boolean" } } }] },
+    "environment": { "type": "object", "additionalProperties": false, "properties": { "remove": { "$ref": "#/$defs/strings" }, "set": { "type": "object", "additionalProperties": { "$ref": "#/$defs/environmentValue" } } } },
+    "policy": { "type": "object", "additionalProperties": false, "properties": { "defaultTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 }, "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 }, "allowStdin": { "type": "boolean" }, "gracePeriodMs": { "type": "integer", "minimum": 1, "maximum": 60000 }, "finalTerminationWaitMs": { "type": "integer", "minimum": 1, "maximum": 60000 }, "artifactPolicy": { "enum": ["never", "on-truncation", "always"] } } },
+    "programFields": { "type": "object", "additionalProperties": false, "properties": { "candidates": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }, "required": { "type": "boolean" }, "enabled": { "type": "boolean" }, "policy": { "$ref": "#/$defs/policy" }, "environment": { "$ref": "#/$defs/environment" } } },
+    "program": { "allOf": [{ "$ref": "#/$defs/programFields" }, { "required": ["candidates"] }] },
+    "partialProgram": { "$ref": "#/$defs/programFields" },
+    "platform": { "type": "object", "additionalProperties": false, "properties": { "searchPath": { "$ref": "#/$defs/strings" }, "pathExt": { "type": "string" }, "allowInheritedPath": { "type": "boolean" }, "environment": { "$ref": "#/$defs/environment" }, "programs": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/partialProgram" } } } },
+    "probe": { "type": "object", "additionalProperties": false, "properties": { "args": { "$ref": "#/$defs/strings" }, "acceptedExitCodes": { "type": "array", "items": { "type": "integer" } }, "cwd": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|/)" } } }
+  },
+  "$comment": "Runtime additionally rejects required programs disabled by base/platform merging and policies whose defaultTimeoutMs exceeds maxTimeoutMs."
+}

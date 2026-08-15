@@ -1,24 +1,98 @@
 #!/usr/bin/env node
+import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { codexSnippet, discoveredManifest, doctor, dshSnippet, EXIT, readManifest, runtimeOptions, writeManifestTemplate, type ManagementOptions } from "./management.js";
 import { createServer } from "./server.js";
+import { MAX_ARTIFACT_QUOTA_BYTES, MAX_ARTIFACT_RETENTION_MS, MAX_ARTIFACT_STREAM_BYTES, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, MAX_OUTPUT_BYTES, validateRuntimeLimits } from "./config.js";
 
-function parseRoot(argv: readonly string[]): string {
-  const index = argv.indexOf("--root");
-  if (index === -1) return process.cwd();
-  const value = argv[index + 1];
-  if (!value) throw new Error("--root requires a path");
-  return resolve(value);
+type Command = "serve" | "init" | "doctor" | "print-config";
+interface Parsed { command: Command; target?: "codex" | "dsh"; options: ManagementOptions; execute: boolean; all: boolean; force: boolean; yes: boolean; initPath?: string; legacy: boolean; }
+export class CliUsageError extends Error { }
+
+function integer(value: string, name: string, maximum = Number.MAX_SAFE_INTEGER): number { const result = Number(value); if (!Number.isSafeInteger(result) || result <= 0 || result > maximum) throw new CliUsageError(`INVALID_OPTION: ${name}`); return result; }
+function requireValue(argv: readonly string[], index: number, flag: string): string { const value = argv[index + 1]; if (!value || value.startsWith("--")) throw new CliUsageError(`${flag} requires a value`); return value; }
+
+export function parseCli(argv: readonly string[]): Parsed {
+  const first = argv[0];
+  if (first && !first.startsWith("--") && !["serve", "init", "doctor", "print-config"].includes(first)) throw new CliUsageError(`UNKNOWN_COMMAND: ${first}`);
+  const command: Command = first === "serve" || first === "init" || first === "doctor" || first === "print-config" ? first : "serve";
+  const legacy = command === "serve" && first !== "serve";
+  let index = legacy ? 0 : 1;
+  const options: ManagementOptions = { roots: [] };
+  let execute = false; let all = false; let force = false; let yes = false; let target: "codex" | "dsh" | undefined; let initPath: string | undefined;
+  if (command === "print-config") { target = argv[index] as "codex" | "dsh" | undefined; index++; if (target !== "codex" && target !== "dsh") throw new CliUsageError("print-config requires codex or dsh"); }
+  if (command === "init" && argv[index] && !argv[index]!.startsWith("--")) initPath = argv[index++];
+  for (; index < argv.length; index++) {
+    const flag = argv[index]!;
+    if ((flag === "--execute" || flag === "--probe") && command === "doctor") { execute = true; if (flag === "--probe") console.error("system-command-mcp: --probe is deprecated; use --execute"); continue; }
+    if (flag === "--all" && command === "doctor") { all = true; continue; }
+    if (flag === "--force" && command === "init") { force = true; continue; }
+    if (flag === "--yes" && command === "init") { yes = true; continue; }
+    if (flag.startsWith("--") && ["--execute", "--probe", "--all", "--force", "--yes"].includes(flag)) throw new CliUsageError(`${flag} is not valid for ${command}`);
+    const value = requireValue(argv, index, flag); index++;
+    if (flag === "--manifest") options.manifestPath = resolve(value);
+    else if (flag === "--root") options.roots.push(resolve(value));
+    else if (flag === "--artifact-dir") options.artifactDirectory = resolve(value);
+    else if (flag === "--artifact-retention-ms") options.artifactRetentionMs = integer(value, flag, MAX_ARTIFACT_RETENTION_MS);
+    else if (flag === "--artifact-quota-bytes") options.artifactQuotaBytes = integer(value, flag, MAX_ARTIFACT_QUOTA_BYTES);
+    else if (flag === "--artifact-max-stream-bytes") options.artifactMaxStreamBytes = integer(value, flag, MAX_ARTIFACT_STREAM_BYTES);
+    else if (flag === "--max-output-bytes") options.maxOutputBytes = integer(value, flag, MAX_OUTPUT_BYTES);
+    else if (flag === "--inline-head-bytes") options.inlineHeadBytes = integer(value, flag, MAX_OUTPUT_BYTES);
+    else if (flag === "--default-timeout-ms") options.defaultTimeoutMs = integer(value, flag, MAX_DEFAULT_TIMEOUT_MS);
+    else if (flag === "--max-concurrent-executions") options.maxConcurrentExecutions = integer(value, flag, MAX_CONCURRENT_EXECUTIONS);
+    else throw new CliUsageError(`UNKNOWN_OPTION: ${flag}`);
+  }
+  if (all && !execute) throw new CliUsageError("--all requires --execute");
+  try { validateRuntimeLimits(options); } catch { throw new CliUsageError("INVALID_RUNTIME_CONFIG"); }
+  if ((command === "doctor" || command === "print-config") && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
+  if (command === "doctor" && !options.manifestPath) throw new CliUsageError("MANIFEST_REQUIRED");
+  if (command === "serve" && options.manifestPath && !options.roots.length) throw new CliUsageError("ROOT_REQUIRED");
+  return { command, target, options, execute, all, force, yes, initPath, legacy };
 }
 
-async function main(): Promise<void> {
-  const root = parseRoot(process.argv.slice(2));
-  const server = await createServer({ root });
+export async function selectDetectedPrograms(content: string, required: (name: string) => Promise<boolean>): Promise<string> {
+  const manifest = JSON.parse(content) as { programs: Record<string, { required: boolean }> };
+  for (const [name, program] of Object.entries(manifest.programs)) program.required = await required(name);
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+async function interactiveManifest(content: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliUsageError("init requires an interactive TTY; use --yes to make all detected programs optional");
+  const readline = createInterface({ input: process.stdin, output: process.stdout });
+  try { return selectDetectedPrograms(content, async name => /^(y|yes)$/i.test((await readline.question(`Require detected program ${name}? [y/N] `)).trim())); } finally { readline.close(); }
+}
+
+async function serve(options: ManagementOptions): Promise<void> {
+  const manifest = options.manifestPath ? await readManifest(options.manifestPath) : undefined;
+  if (manifest && !options.roots.length) throw new Error("ROOT_REQUIRED");
+  const roots = options.roots.length ? options.roots : [process.cwd()];
+  const server = await createServer(runtimeOptions({ ...options, roots }, manifest));
   await server.connect(new StdioServerTransport());
-  console.error("system-command-mcp running on stdio (root: " + root + ")");
+  console.error(`system-command-mcp running on stdio (roots: ${roots.join(", ")})`);
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
-  process.exitCode = 1;
+export async function main(argv = process.argv.slice(2)): Promise<void> {
+  const parsed = parseCli(argv);
+  if (parsed.command === "serve") { if (parsed.legacy) console.error("system-command-mcp: legacy direct flags are deprecated; use serve"); return serve(parsed.options); }
+  if (parsed.command === "init") {
+    const path = resolve(parsed.initPath ?? parsed.options.manifestPath ?? "system-command-manifest.json");
+    const detected = await discoveredManifest();
+    await writeManifestTemplate(path, parsed.force, parsed.yes ? detected : await interactiveManifest(detected));
+    console.error(`wrote ${path}`);
+    const options = { ...parsed.options, manifestPath: path, roots: parsed.options.roots.length ? parsed.options.roots : [process.cwd()] };
+    process.stdout.write(`${codexSnippet(options)}\n${dshSnippet(options)}`);
+    return;
+  }
+  if (parsed.command === "doctor") { const result = await doctor(parsed.options, parsed.execute, parsed.all); console.error(`doctor: ${result.message}`); return; }
+  if (parsed.options.manifestPath && !parsed.options.roots.length) throw new Error("ROOT_REQUIRED");
+  const options = { ...parsed.options, roots: parsed.options.roots.length ? parsed.options.roots : [process.cwd()] };
+  process.stdout.write(parsed.target === "codex" ? codexSnippet(options) : dshSnippet(options));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`system-command-mcp: ${message}`);
+  process.exitCode = error instanceof CliUsageError ? EXIT.usage : EXIT.unusable;
 });
