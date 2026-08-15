@@ -33,22 +33,29 @@ npm test
 
 需要 Node.js 20 或更高版本。
 
-## MCP 配置
+## 管理 CLI 与 MCP 配置
 
-```json
-{
-  "mcpServers": {
-    "system-command": {
-      "command": "node",
-      "args": [
-        "/absolute/path/system-command-mcp/dist/src/cli.js",
-        "--root",
-        "/absolute/path/to/workspace"
-      ]
-    }
-  }
-}
+```bash
+# 生成不可覆盖的确定性 Manifest；不会修改 Codex 或 DSH 配置
+system-command-mcp init --manifest system-command-manifest.json
+# 显式启动；旧的 `--root PATH` 调用在 1.0 前仍兼容，但会发出 stderr 弃用提示
+system-command-mcp serve --manifest system-command-manifest.json --root /absolute/path/to/workspace
+# 默认只做静态 JSON/Manifest/Root 检查，不会执行程序；--probe 才会解析程序
+system-command-mcp doctor --manifest system-command-manifest.json --root /absolute/path/to/workspace
+system-command-mcp doctor --probe --manifest system-command-manifest.json --root /absolute/path/to/workspace
+# 仅把对应的配置片段写到 stdout，注意审阅后手动添加
+system-command-mcp print-config codex --manifest system-command-manifest.json --root /absolute/path/to/workspace
+system-command-mcp print-config dsh --manifest system-command-manifest.json --root /absolute/path/to/workspace
 ```
+
+Manifest Schema 和示例分别为 `system-command-manifest.schema.json`、`system-command-manifest.example.json`。Codex 输出会识别 `CODEX_HOME`（默认 `~/.codex`），并包含 `command`、`args`、`cwd`、`startup_timeout_sec` 和 `tool_timeout_sec`。DSH 输出包含 `toolCallTimeoutMs`、`failOnStartupError` 和 `reconnect`。
+
+## Host Guidance
+
+- 一个直接的已注册 Program 调用使用 `system_exec`；
+- 管道、重定向、展开及其他 Shell 组合使用宿主 Shell；
+- 读写和枚举文件使用宿主文件系统工具；
+- Root 只验证执行进程的 cwd，**不是**文件系统沙箱，也不会限制已启动程序能访问的文件。
 
 ## 默认逻辑程序名
 

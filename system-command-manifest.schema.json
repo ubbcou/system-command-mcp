@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "System Command MCP Program Manifest v1",
+  "type": "object",
+  "required": ["version", "programs"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "searchPath": { "type": "array", "items": { "type": "string" } },
+    "pathExt": { "type": "string" },
+    "allowInheritedPath": { "type": "boolean" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "programs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/program" } },
+    "platforms": { "type": "object", "additionalProperties": { "$ref": "#/$defs/platform" } }
+  },
+  "$defs": {
+    "environment": { "type": "object", "additionalProperties": false, "properties": { "remove": { "type": "array", "items": { "type": "string" } }, "set": { "type": "object" } } },
+    "policy": { "type": "object", "additionalProperties": false, "properties": { "defaultTimeoutMs": { "type": "integer", "minimum": 1 }, "maxTimeoutMs": { "type": "integer", "minimum": 1 }, "allowStdin": { "type": "boolean" }, "gracePeriodMs": { "type": "integer", "minimum": 1 }, "finalTerminationWaitMs": { "type": "integer", "minimum": 1 }, "artifactPolicy": { "enum": ["never", "on-truncation", "always"] } } },
+    "program": { "type": "object", "additionalProperties": false, "required": ["candidates"], "properties": { "candidates": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }, "required": { "type": "boolean" }, "enabled": { "type": "boolean" }, "policy": { "$ref": "#/$defs/policy" }, "environment": { "$ref": "#/$defs/environment" } } },
+    "platform": { "type": "object", "additionalProperties": false, "properties": { "searchPath": { "type": "array", "items": { "type": "string" } }, "pathExt": { "type": "string" }, "allowInheritedPath": { "type": "boolean" }, "environment": { "$ref": "#/$defs/environment" }, "programs": { "type": "object" } } }
+  }
+}
