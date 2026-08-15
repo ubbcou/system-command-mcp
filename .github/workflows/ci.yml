@@ -24,3 +24,12 @@ jobs:
       - run: node -e "if (process.platform === 'darwin') console.log('macOS architecture:', process.arch)"
       - run: npm ci
       - run: npm test
+      - name: Install pinned DSH portable acceptance runtime
+        run: npm install --no-save --package-lock=false @deepseek-ai/dsh@0.1.0-rc.6
+      - name: Run portable DSH acceptance
+        run: npm run acceptance:portable
+      - name: Run DSH direct and reconnect acceptance
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          npm run acceptance:dsh
+          npm run acceptance:dsh-reconnect

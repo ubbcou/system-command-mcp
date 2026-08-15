@@ -1,28 +1,33 @@
 {
-  "platform": "win32",
-  "architecture": "x64",
-  "node": "v22.20.0",
-  "dsh": "0.1.0-rc.6",
-  "codex": "codex-cli 0.147.0",
-  "tools": {
-    "codex": ["system_environment"],
-    "dsh": [
+  "evidenceSource": "credentialed-local-real-host",
+  "gitCommitTested": "209e919",
+  "gitCommitSource": "integration/host-acceptance HEAD when evidence was recorded",
+  "commands": [
+    "npm test",
+    "npm run acceptance:portable",
+    "DSH_CHECKOUT=<dsh checkout> npm run acceptance:dsh-reconnect",
+    "codex mcp list --json",
+    "codex mcp get system-command --json"
+  ],
+  "codex": {
+    "version": "codex-cli 0.147.0",
+    "registration": { "listed": true, "systemCommand": true },
+    "toolCallCompleted": true
+  },
+  "dsh": {
+    "version": "0.1.0-rc.6",
+    "tools": [
       "mcp__system-command__system_environment",
       "mcp__system-command__system_exec",
       "mcp__system-command__system_output"
-    ]
+    ],
+    "reconnect": { "pidChanged": true, "disposedToolsEmpty": true }
   },
-  "codex": {
-    "toolCall": "success",
-    "tool": "system_environment"
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "mode": "configured",
+    "programNames": ["node"]
   },
-  "dsh": {
-    "mcpSmoke": "success",
-    "pidChangedAfterReconnect": true,
-    "disposedToolsEmpty": true
-  },
-  "commandResultShapes": {
-    "codex": ["content", "isError"],
-    "dsh": ["content", "isError"]
-  }
+  "claim": "This credentialed local observation is not CI transport/runtime acceptance and makes no cross-host claim."
 }

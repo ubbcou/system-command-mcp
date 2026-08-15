@@ -25,6 +25,7 @@
     "acceptance:portable": "npm run build && node scripts/integration/acceptance-portable.mjs",
     "acceptance:dsh": "node scripts/integration/dsh-mcp-smoke.mjs",
     "acceptance:dsh-reconnect": "node scripts/integration/dsh-mcp-reconnect-smoke.mjs",
+    "acceptance:codex-real-host": "node scripts/integration/codex-real-host-evidence.mjs",
     "start": "node dist/src/cli.js"
   },
   "engines": {

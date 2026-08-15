@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 
 const root = await mkdtemp(join(tmpdir(), "system-command-acceptance-"));
 const manifest = join(root, "manifest.json");
+const artifacts = join(root, "artifacts");
 const cli = resolve("dist/src/cli.js");
 const run = (file, args = [], environment = {}) => {
   const result = spawnSync(process.execPath, [file, ...args], { cwd: process.cwd(), env: { ...process.env, ...environment }, encoding: "utf8" });
@@ -12,10 +13,10 @@ const run = (file, args = [], environment = {}) => {
   return result.stdout.trim();
 };
 try {
-  await writeFile(manifest, JSON.stringify({ version: 1, allowInheritedPath: false, programs: { node: { candidates: [process.execPath], required: true } } }, null, 2));
-  run(cli, ["doctor", "--manifest", manifest, "--root", root]);
-  const smoke = run("scripts/integration/dsh-mcp-smoke.mjs", [], { SYSTEM_COMMAND_MANIFEST: manifest, SYSTEM_COMMAND_ROOT: root });
-  console.log(JSON.stringify({ root: "$ROOT", manifest: "$MANIFEST", doctor: "ok", mcp: JSON.parse(smoke) }));
+  await writeFile(manifest, JSON.stringify({ version: 1, allowInheritedPath: false, programs: { node: { candidates: [process.execPath], required: true, policy: { artifactPolicy: "always", defaultTimeoutMs: 500, maxTimeoutMs: 1_000 } } } }, null, 2));
+  run(cli, ["doctor", "--manifest", manifest, "--root", root, "--artifact-dir", artifacts]);
+  const smoke = run("scripts/integration/dsh-mcp-smoke.mjs", [], { SYSTEM_COMMAND_MANIFEST: manifest, SYSTEM_COMMAND_ROOT: root, SYSTEM_COMMAND_ARTIFACT_DIR: artifacts });
+  console.log(JSON.stringify({ root: "$ROOT", manifest: "$MANIFEST", artifactDirectory: "$ARTIFACT_DIR", doctor: "ok", dsh: JSON.parse(smoke) }));
 } finally {
   await rm(root, { recursive: true, force: true });
 }
