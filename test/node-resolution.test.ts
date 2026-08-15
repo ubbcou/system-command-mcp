@@ -30,17 +30,17 @@ test("node resolver selects nearest declaration, highest satisfying version, and
 
 test("discovery does not execute unknown layouts and rejects realpath escape", async (t) => {
   if (process.platform === "win32") return t.skip("symlink fixture needs elevated privilege on this host");
-  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-untrusted-")); const marker = join(root, "marker"); const binary = join(root, "untrusted", "v99.0.0", "bin", "node"); await mkdir(dirname(binary), { recursive: true }); await writeFile(binary, `#!/bin/sh\nprintf executed > "${marker}"\n`); await chmod(binary, 0o755);
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-untrusted-")); await node(root, "v20.1.0"); const marker = join(root, "marker"); const binary = join(root, "untrusted", "v99.0.0", "bin", "node"); await mkdir(dirname(binary), { recursive: true }); await writeFile(binary, `#!/bin/sh\nprintf executed > "${marker}"\n`); await chmod(binary, 0o755);
   const escaped = join(root, "v22.0.0", "bin", "node"); await mkdir(dirname(escaped), { recursive: true }); await symlink(execPath, escaped);
   const instance = await runtime(root);
-  try { assert.deepEqual((await instance.inspectEnvironment()).programs.node?.variantSet?.variants, []); await assert.rejects(readFile(marker)); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+  try { assert.deepEqual((await instance.inspectEnvironment()).programs.node?.variantSet?.variants.map(item => item.version), ["20.1.0"]); await assert.rejects(readFile(marker)); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("declaration files fail closed and precedence does not bypass invalid files", async (t) => {
   if (process.platform === "win32") return t.skip("symlink fixture needs elevated privilege on this host");
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-declarations-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); const instance = await runtime(root);
   try {
-    for (const [name, content] of [[".nvmrc", ""], [".node-version", "x"], ["package.json", "{"]] as [string, string][]) { await rm(join(project, ".nvmrc"), { force: true }); await rm(join(project, ".node-version"), { force: true }); await rm(join(project, "package.json"), { force: true }); await writeFile(join(project, name), content); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_(DECLARATION|VERSION_REQUIREMENT)_INVALID/); }
+    for (const [name, content] of [[".nvmrc", ""], [".node-version", "not-a-range"], ["package.json", "{"]] as [string, string][]) { await rm(join(project, ".nvmrc"), { force: true }); await rm(join(project, ".node-version"), { force: true }); await rm(join(project, "package.json"), { force: true }); await writeFile(join(project, name), content); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_(DECLARATION|VERSION_REQUIREMENT)_INVALID/, `${name} must fail closed`); }
     await rm(join(project, "package.json")); await writeFile(join(project, ".node-version"), "22"); await symlink(join(root, "outside"), join(project, ".nvmrc")); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_DECLARATION_INVALID: \.nvmrc/);
     await rm(join(project, ".nvmrc")); await writeFile(join(project, "package.json"), "x".repeat(1024 * 1024 + 1)); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_DECLARATION_INVALID: package.json/);
   } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
