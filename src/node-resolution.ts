@@ -195,7 +195,17 @@ export async function resolveProjectNodeV2(cwd: string, root: string, variants: 
       let parsed: Record<string, unknown>;
       try { const value: unknown = JSON.parse(pkg); if (!value || typeof value !== 'object' || Array.isArray(value)) declarationError('package.json'); parsed = value as Record<string, unknown>; } catch (error) { if (error instanceof Error && error.message.startsWith('NODE_DECLARATION_INVALID:')) throw error; return declarationError('package.json'); }
       const dev = parsed.devEngines;
-      if (dev !== undefined) { if (!dev || typeof dev !== 'object' || Array.isArray(dev)) declarationError('package.json#devEngines.runtime'); const runtime = (dev as Record<string, unknown>).runtime; const entry = Array.isArray(runtime) ? runtime.find(x => !!x && typeof x === 'object' && !Array.isArray(x) && (x as Record<string, unknown>).name === 'node') : runtime; if (entry !== undefined) { if (!entry || typeof entry !== 'object' || Array.isArray(entry) || (entry as Record<string, unknown>).name !== 'node' || typeof (entry as Record<string, unknown>).version !== 'string') declarationError('package.json#devEngines.runtime'); exact.push({ requirement: (entry as Record<string, unknown>).version as string, source: 'package.json#devEngines.runtime' }); } }
+      if (dev !== undefined) {
+        if (!dev || typeof dev !== 'object' || Array.isArray(dev)) declarationError('package.json#devEngines.runtime');
+        const runtime = (dev as Record<string, unknown>).runtime;
+        for (const candidate of Array.isArray(runtime) ? runtime : runtime === undefined ? [] : [runtime]) {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) declarationError('package.json#devEngines.runtime');
+          const entry = candidate as Record<string, unknown>;
+          if (entry.name !== 'node') continue;
+          if (typeof entry.version !== 'string' || !version(entry.version)) requirementError('package.json#devEngines.runtime');
+          exact.push({ requirement: entry.version, source: 'package.json#devEngines.runtime' });
+        }
+      }
       const volta = parsed.volta;
       if (volta !== undefined) { if (!volta || typeof volta !== 'object' || Array.isArray(volta)) declarationError('package.json#volta.node'); const found = (volta as Record<string, unknown>).node; if (found !== undefined) { if (typeof found !== 'string') declarationError('package.json#volta.node'); exact.push({ requirement: found, source: 'package.json#volta.node' }); } }
       const engines = parsed.engines;

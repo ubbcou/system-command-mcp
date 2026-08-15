@@ -98,6 +98,20 @@ test("v2 selects exact nearest declaration, checks ancestor engines, and default
   } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("v2 devEngines runtime selects only exact Node entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-dev-engines-")); await node(root, "v20.1.0"); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); const instance = await runtimeV2(root, project, "20.1.0");
+  const execute = async (runtime: unknown) => { await writeFile(join(project, "package.json"), JSON.stringify({ devEngines: { runtime } })); return instance.execute({ program: "node", cwd: project }); };
+  try {
+    assert.equal((await execute({ name: "bun", version: "1.2.3" })).programSelection?.version, "20.1.0");
+    assert.equal((await execute([{ name: "bun", version: "1.2.3" }])).programSelection?.version, "20.1.0");
+    assert.equal((await execute({ name: "node", version: "22.2.0" })).programSelection?.version, "22.2.0");
+    await assert.rejects(execute({ name: "node", version: "22" }), /NODE_VERSION_REQUIREMENT_INVALID: package.json#devEngines.runtime/);
+    assert.equal((await execute([{ name: "node", version: "22.2.0" }, { name: "node", version: "22.2.0" }])).programSelection?.version, "22.2.0");
+    await assert.rejects(execute([{ name: "node", version: "20.1.0" }, { name: "node", version: "22.2.0" }]), /PROJECT_NODE_DECLARATION_CONFLICT/);
+    await assert.rejects(execute([{ name: "node", version: "22.2.0" }, { name: "node", version: "22" }]), /NODE_VERSION_REQUIREMENT_INVALID: package.json#devEngines.runtime/);
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("v2 conflicts fail closed and keeps outside enabled roots static", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-conflict-")); await node(root, "v22.2.0"); const project = join(root, "project"); const outside = join(root, "outside"); await mkdir(project); await mkdir(outside); await writeFile(join(project, ".nvmrc"), "22.2.0"); await writeFile(join(project, ".node-version"), "20.1.0");
   const instance = await runtimeV2(root, project, "v22.2.0");
