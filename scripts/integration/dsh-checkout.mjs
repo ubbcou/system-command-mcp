@@ -2,7 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 const defaultCheckout = new URL("../../acceptance/dsh", import.meta.url);
@@ -14,7 +14,7 @@ function modulesAt(root) {
 }
 
 export function dshModules() {
-  const checkout = process.env.DSH_CHECKOUT ?? defaultCheckout.pathname;
+  const checkout = process.env.DSH_CHECKOUT ?? fileURLToPath(defaultCheckout);
   const checkoutModules = modulesAt(resolve(checkout));
   if (checkoutModules) return checkoutModules;
   if (process.env.DSH_CHECKOUT) throw new Error(`${usage}\nDSH_CHECKOUT=${process.env.DSH_CHECKOUT}`);
