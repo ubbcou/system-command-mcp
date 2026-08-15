@@ -65,6 +65,22 @@ test("Windows lifecycle bounds failed Job termination fallback", async () => {
   adapter.close();
 });
 
+test("Windows termination shares one final deadline between root wait and accounting", async () => {
+  const adapter = createLifecycleAdapter(child() as never, 500, 40, {
+    platform: "win32",
+    windowsApis: {
+      CreateJobObjectW: () => "job", SetInformationJobObject: () => true, OpenProcess: () => "process", AssignProcessToJobObject: () => true,
+      TerminateJobObject: () => true, GetLastError: () => 0, CloseHandle: () => true,
+      QueryInformationJobObject: (_job, _class, info) => { info.writeUInt32LE(1, 40); return true; },
+    },
+  });
+  const started = Date.now();
+  const outcome = await adapter.terminate("timeout", new Promise(() => {}));
+  assert.ok(Date.now() - started < 70);
+  assert.equal(outcome.cleanupError, "FINAL_WAIT_EXPIRED");
+  adapter.close();
+});
+
 test("Windows natural close force-cleans remaining Job members without claiming containment", async () => {
   const calls: string[] = [];
   const adapter = createLifecycleAdapter(child() as never, 500, 20, {

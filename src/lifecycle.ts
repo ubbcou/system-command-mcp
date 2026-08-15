@@ -133,8 +133,7 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
     if (!api.QueryInformationJobObject(job, 1, info, info.length, null)) return { cleanupError: "JOB_ACCOUNTING_QUERY_FAILED" };
     return { active: info.readUInt32LE(40) };
   };
-  const accounting = async (): Promise<{ active?: number; cleanupError?: string }> => {
-    const deadline = Date.now() + finalWaitMs;
+  const accounting = async (deadline: number): Promise<{ active?: number; cleanupError?: string }> => {
     for (;;) {
       const status = activeMembers();
       if (status.cleanupError || status.active === 0) return status;
@@ -147,7 +146,8 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
     async terminate(reason, rootClosed) {
       // Windows has no generic graceful tree-stop request. Force immediately; do not spend a fake grace period.
       const gracefulRequested = false;
-      const rootExit = Promise.race([rootClosed.then(() => true), wait(finalWaitMs).then(() => false)]);
+      const deadline = Date.now() + finalWaitMs;
+      const rootExit = Promise.race([rootClosed.then(() => true), wait(Math.max(0, deadline - Date.now())).then(() => false)]);
       if (setupError || !job || !api.TerminateJobObject) {
         const fallbackDiagnostic = await fallback();
         const rootExited = await rootExit;
@@ -160,7 +160,7 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
         return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: error, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable", fallback: fallbackDiagnostic } };
       }
       const rootExited = await rootExit;
-      const status = await accounting();
+      const status = await accounting(deadline);
       return { reason, gracefulRequested, forceUsed: true, treeCleaned: false, cleanupError: !rootExited ? "FINAL_WAIT_EXPIRED" : status.cleanupError, diagnostics: { adapter: "windows-job-object", containment: windowsContainment, containmentRace: "pre-assignment-unverifiable", activeProcesses: status.active } };
     },
     async naturalClose() {
@@ -171,7 +171,7 @@ function windowsLifecycle(child: ChildProcess, finalWaitMs: number, options: Lif
       if (status.active === 0) return undefined;
       const terminated = !!api.TerminateJobObject?.(job, 137);
       const error = terminated ? undefined : windowsError("TerminateJobObject", api.GetLastError);
-      const settled = await accounting();
+      const settled = await accounting(Date.now() + finalWaitMs);
       return { reason: null, gracefulRequested: false, forceUsed: true, treeCleaned: false, cleanupError: settled.cleanupError ?? error, diagnostics: { ...diagnostics, activeProcesses: settled.active } };
     },
     close() { if (closed) return; closed = true; if (processHandle) api.CloseHandle?.(processHandle); if (job) api.CloseHandle?.(job); processHandle = undefined; job = undefined; },
