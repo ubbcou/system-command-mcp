@@ -1,55 +1,46 @@
-# Acceptance Evidence
+# Acceptance
 
-Validated on 2026-08-15 without publishing npm or creating a GitHub Release.
-
-## Support matrix
-
-| Target | Status | Evidence |
-|---|---|---|
-| Windows x64, Node 20/22 | Validated | Local Windows x64 suite and GitHub Actions matrix after canonical-path regression fix. |
-| macOS x64, Node 20/22 | CI configured | GitHub-hosted `macos-latest` jobs; runner availability was delayed during acceptance. |
-| macOS arm64 | Not yet CI-validated | No public arm64 hosted runner was available to this repository. Support is an implementation target, not a claimed CI result. |
-| Linux x64, Node 20/22 | Compatibility CI | GitHub Actions matrix; non-blocking platform target. |
+This document separates reproducible checks from one local host observation. It does not claim that all platform acceptance is complete.
 
 ## Reproducible checks
 
+Build first, then run the portable orchestrator. It creates `$ROOT` and `$MANIFEST` under the native temporary directory, configures `node` as `process.execPath`, runs `doctor`, and verifies the DSH MCP tools and `system_environment` call.
+
 ```text
 npm test
-# 83 tests: 79 passed, 4 Windows-inapplicable skipped
-
+npm run acceptance:portable
 npm pack --dry-run
-# clean-source prepack builds dist and includes the executable CLI
-
-node dist/src/cli.js doctor --manifest acceptance.manifest.json --root C:\Users\ubbco\Desktop
-# static configuration valid; no program executed
-
-codex mcp get system-command --json
-codex mcp list --json
-# effective command, args, cwd, startup 30s, tool 300s confirmed
-
-codex exec --json --sandbox danger-full-access --skip-git-repo-check "Use the system-command MCP tool system_environment exactly once. Return only the registered node executable path."
-# real mcp_tool_call completed and returned the configured Node executable
-
-node .scratch/dsh-mcp-smoke.mjs
-# exact tools registered: system_environment, system_exec, system_output; system_environment executed
-
-node integration/host-acceptance/.scratch/dsh-mcp-reconnect-smoke.mjs
-# pid changed after die response; dispose left tools=[]
 ```
 
-## Host integration
+The DSH scripts need either `DSH_CHECKOUT` pointing at a DSH checkout/npx root or a resolvable `dsh` executable whose npx root contains its packages. They print a clear `SKIP`/usage error when neither is available.
 
-- Codex effective config: `%CODEX_HOME%\config.toml`.
-- DSH Web profile patch: `%DSH_HOME%\profiles\web\cordis.patch.yml`.
-- Timestamped backups were created before modification with suffix `system-command-backup-20260815-155412`.
-- Working Directory Roots validate process `cwd`; they are not a filesystem sandbox.
-- Native Programs use literal arguments. Windows `.cmd`/`.bat` Platform Wrappers are `cmd-reparsed` and reject unsafe arguments.
+```text
+# $MANIFEST must use native absolute paths; $ROOT is an authorized absolute root.
+DSH_CHECKOUT=/path/to/dsh npm run acceptance:dsh
+SYSTEM_COMMAND_MANIFEST=$MANIFEST SYSTEM_COMMAND_ROOT=$ROOT npm run acceptance:dsh
+DSH_CHECKOUT=/path/to/dsh npm run acceptance:dsh-reconnect
+```
+
+`acceptance:dsh` defaults to `process.execPath` and the built CLI, and accepts an MCP executable plus its leading arguments after `--`; it obtains the manifest and root from `SYSTEM_COMMAND_MANIFEST` and `SYSTEM_COMMAND_ROOT`. `acceptance:dsh-reconnect` uses only the repository fixture in `scripts/integration/pid-die-server.mjs`.
+
+## Local host evidence
+
+[`acceptance-windows-x64.json`](acceptance-windows-x64.json) is redacted Windows x64 evidence: host versions, the exact MCP tool names, successful Codex and DSH tool calls, reconnect PID-change boolean, empty disposal state, and result shapes. It intentionally omits usernames, absolute paths, and process IDs. Local evidence is not a substitute for reproducible acceptance.
+
+## Platform status
+
+| Target | Status | Basis |
+|---|---|---|
+| Windows x64 | Local host evidence | Structured evidence plus the reproducible scripts above. |
+| macOS x64 | Not accepted here | Run the same reproducible checks on that host. |
+| macOS arm64 | **Unresolved external acceptance blocker** | This repository has no available external macOS arm64 host/runner for acceptance. |
+| Linux x64 | Not accepted here | Run the same reproducible checks on that host. |
 
 ## Package audit
 
-The dry-run tarball contains compiled runtime/MCP/CLI files, declaration files and maps, README, Host Guidance, Manifest schema/example, license, and package metadata. It excludes tests, scratch fixtures, local acceptance configuration, caches, and repository metadata.
+`npm pack --dry-run` is the package check. `package.json` publishes only the declared runtime/docs/schema files; the integration scripts and local acceptance evidence are explicitly excluded.
 
-## Deferred irreversible actions
+## Deferred actions
 
 - No `npm publish`.
-- No formal GitHub Release.
+- No GitHub Release.

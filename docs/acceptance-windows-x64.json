@@ -1,0 +1,28 @@
+{
+  "platform": "win32",
+  "architecture": "x64",
+  "node": "v22.20.0",
+  "dsh": "0.1.0-rc.6",
+  "codex": "codex-cli 0.147.0",
+  "tools": {
+    "codex": ["system_environment"],
+    "dsh": [
+      "mcp__system-command__system_environment",
+      "mcp__system-command__system_exec",
+      "mcp__system-command__system_output"
+    ]
+  },
+  "codex": {
+    "toolCall": "success",
+    "tool": "system_environment"
+  },
+  "dsh": {
+    "mcpSmoke": "success",
+    "pidChangedAfterReconnect": true,
+    "disposedToolsEmpty": true
+  },
+  "commandResultShapes": {
+    "codex": ["content", "isError"],
+    "dsh": ["content", "isError"]
+  }
+}
