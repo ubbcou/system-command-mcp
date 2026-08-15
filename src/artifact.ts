@@ -35,14 +35,15 @@ export class ArtifactStore {
     const name = `.spool-${this.runtimeId}-${randomBytes(16).toString("hex")}`;
     const path = join(this.directory, name);
     const staging = `${path}.new`;
+    const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
     await mkdir(staging, { mode: 0o700 });
     try {
-      await writeFile(join(staging, "owner.json"), JSON.stringify({ runtimeId: this.runtimeId, leaseUntil: Date.now() + LOCK_STALE_MS }), { mode: 0o600 });
+      await writeFile(join(staging, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
       await writeFile(join(staging, "stdout"), "", { mode: 0o600 });
       await writeFile(join(staging, "stderr"), "", { mode: 0o600 });
       await rename(staging, path);
     } catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
-    const spool = new ArtifactSpool(path, this.maxStreamBytes, () => this.spools.delete(spool));
+    const spool = new ArtifactSpool(path, this.maxStreamBytes, owner, () => this.spools.delete(spool));
     this.spools.add(spool);
     return spool;
   }
@@ -115,20 +116,23 @@ export class ArtifactStore {
     }
   }
   private async removeOwned(path: string, owner: Owner): Promise<void> {
-    try { const current = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (current.runtimeId === owner.runtimeId && current.token === owner.token) await rm(path, { recursive: true, force: true }); } catch { /* ownership changed or lock already gone */ }
+    try { const current = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (current.runtimeId === owner.runtimeId && current.token === owner.token && current.leaseUntil === owner.leaseUntil) await rm(path, { recursive: true, force: true }); } catch { /* ownership changed or lock already gone */ }
   }
-  private async touchSpools(): Promise<void> { await Promise.all([...this.spools].map(async spool => { try { await writeFile(join(spool.path, "owner.json"), JSON.stringify({ runtimeId: this.runtimeId, leaseUntil: Date.now() + LOCK_STALE_MS }), { mode: 0o600 }); } catch { spool.failed = true; } })); }
+  private async touchSpools(): Promise<void> { await Promise.all([...this.spools].map(async spool => { try { spool.owner.leaseUntil = Date.now() + LOCK_STALE_MS; await writeFile(join(spool.path, "owner.json"), JSON.stringify(spool.owner), { mode: 0o600 }); } catch { spool.failed = true; } })); }
   private async removeStaleLock(path: string): Promise<void> {
     try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (typeof owner.token === "string" && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner as Owner); } catch { /* malformed lock is not ours to remove */ }
+  }
+  private async removeStaleSpool(path: string): Promise<void> {
+    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (typeof owner.runtimeId === "string" && /^[a-f0-9]{32}$/.test(owner.token ?? "") && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner as Owner); } catch { await rm(path, { recursive: true, force: true }).catch(() => {}); }
   }
   private async recover(): Promise<void> {
     for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && entry.name.startsWith(".spool-")) {
       const path = join(this.directory, entry.name);
       try {
         const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>;
-        if (typeof owner.token === "string" && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil >= Date.now()) continue;
+        if (typeof owner.runtimeId === "string" && /^[a-f0-9]{32}$/.test(owner.token ?? "") && typeof owner.leaseUntil === "number" && Number.isSafeInteger(owner.leaseUntil) && owner.leaseUntil >= Date.now()) continue;
       } catch { /* ownerless or malformed spool is stale */ }
-      await rm(path, { recursive: true, force: true });
+      await this.removeStaleSpool(path);
     }
   }
   private async publishedSize(): Promise<number> { let total = 0; for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && validId.test(entry.name)) { const meta = await this.validMeta(join(this.directory, entry.name)); if (meta) total += meta.stdoutBytes + meta.stderrBytes; } return total; }
@@ -139,7 +143,7 @@ export class ArtifactStore {
 export class ArtifactSpool {
   failed = false; stdoutBytes = 0; stderrBytes = 0;
   private chains: Record<OutputStream, Promise<void>> = { stdout: Promise.resolve(), stderr: Promise.resolve() };
-  constructor(readonly path: string, private readonly maxStreamBytes: number, private readonly removed: () => void) {}
+  constructor(readonly path: string, private readonly maxStreamBytes: number, readonly owner: Owner, private readonly removed: () => void) {}
   async append(stream: OutputStream, chunk: Buffer): Promise<void> { const chain = this.chains[stream] = this.chains[stream].then(async () => { if (this.failed) return; const bytes = stream === "stdout" ? this.stdoutBytes : this.stderrBytes; if (bytes + chunk.length > this.maxStreamBytes) { this.failed = true; return; } try { await appendFile(join(this.path, stream), chunk); if (stream === "stdout") this.stdoutBytes += chunk.length; else this.stderrBytes += chunk.length; } catch { this.failed = true; } }); return chain; }
   async finish(): Promise<void> { await Promise.all(Object.values(this.chains)); }
   async remove(): Promise<void> { await this.finish(); await rm(this.path, { recursive: true, force: true }).catch(() => {}); this.removed(); }
