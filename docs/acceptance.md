@@ -54,8 +54,8 @@ The package allow-list excludes `scripts/`, `acceptance/`, and local evidence.
 
 | Target | Status | Basis |
 |---|---|---|
-| Node 20/22 × Windows/macOS/Linux | Core tests and runtime portable check | `npm test` plus DSH-independent `acceptance:runtime-portable`. |
-| Node 22 × Windows/macOS/Linux | DSH portable host acceptance | Exact locked DSH rc.6 runtime. |
+| Node 20/22 × Windows x64, macOS arm64, Linux x64 | Core tests and runtime portable check | Green GitHub Actions run `31878527243`; CI asserts Windows x64 and recorded macOS `process.arch` as `arm64`. |
+| Node 22 × Windows x64, macOS arm64, Linux x64 | DSH portable host acceptance | Green run `31878527243` using the exact locked DSH rc.6 runtime. |
 | Ubuntu Node 22 | DSH direct/reconnect acceptance | Exact locked DSH rc.6 runtime. |
 | Windows x64 | Credentialed local Codex observation | Parsed and redacted real-host evidence only. |
 
