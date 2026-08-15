@@ -97,6 +97,16 @@ test("doctor rejects invalid supplied runtime configuration with unusable exit",
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("doctor rejects a supplied effective default timeout above a registered Program maximum", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "system-command-cli-")); const path = join(directory, "manifest.json");
+  try {
+    await writeFile(path, manifest({ node: { candidates: [process.execPath], required: true, policy: { maxTimeoutMs: 100 } } }));
+    const result = run(["doctor", "--manifest", path, "--root", directory, "--default-timeout-ms", "200"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /INVALID_RUNTIME_CONFIG: Program node effective defaultTimeoutMs 200 exceeds maxTimeoutMs 100/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("doctor shadows use the program's effective environment layer", async () => {
   const first = await mkdtemp(join(tmpdir(), "system-command-path-")); const second = await mkdtemp(join(tmpdir(), "system-command-path-")); const path = join(first, "manifest.json");
   try {

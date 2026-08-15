@@ -1,7 +1,7 @@
 import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { configuredResolutionPlan, createCommandRuntime, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
+import { configuredResolutionPlan, createCommandRuntime, effectiveTimeoutMs, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
 import { parseManifestProbes } from "./manifest-probes.js";
 import { validateRuntimeLimits } from "./config.js";
 import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
@@ -87,6 +87,13 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
   const runtime = await createCommandRuntime(runtimeOptions(options, rawManifest));
   try {
     const environment = await runtime.inspectEnvironment();
+    for (const [name, program] of Object.entries(environment.programs)) {
+      const policy = manifest.programs[name]!.policy;
+      if (policy?.maxTimeoutMs !== undefined) {
+        const effectiveDefaultTimeoutMs = effectiveTimeoutMs(policy, options.defaultTimeoutMs);
+        if (effectiveDefaultTimeoutMs > policy.maxTimeoutMs) throw new Error(`INVALID_RUNTIME_CONFIG: Program ${program.logicalName} effective defaultTimeoutMs ${effectiveDefaultTimeoutMs} exceeds maxTimeoutMs ${policy.maxTimeoutMs}`);
+      }
+    }
     const winners = Object.values(environment.programs).map(program => `${program.logicalName}=${program.declaredCandidate} -> ${program.executable}`).join(", ");
     const shadows = (await Promise.all(Object.entries(manifest.programs).map(async ([name, program]) => {
       if (program.enabled === false) return undefined;
