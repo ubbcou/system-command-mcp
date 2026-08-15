@@ -104,8 +104,8 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
     const optionalWarnings = Object.entries(manifest.programs)
       .filter(([name, program]) => program.enabled !== false && !program.required && !environment.programs[name])
       .map(([name, program]) => `optional-unavailable: ${name} (candidates: ${program.candidates.join(", ")})`);
-    const resolver = environment.programs.node?.resolver;
-    const resolverDiagnostic = resolver ? `; node-project variants: ${resolver.installed.map(item => item.version).join(", ") || "none"}` : "";
+    const variantSet = environment.programs.node?.variantSet;
+    const resolverDiagnostic = variantSet ? `; node-project variants: ${variantSet.variants.map(item => item.version).join(", ") || "none"}` : "";
     const diagnostic = `${winners || "none"}${shadows.length ? `; shadows: ${shadows.join(" | ")}` : ""}${optionalWarnings.length ? `; warnings: ${optionalWarnings.join(" | ")}` : ""}${resolverDiagnostic}`;
     if (!execute) return { ok: true, message: `static configuration is valid (no programs executed; winners: ${diagnostic})` };
     const disabledProbes = Object.keys(declaredProbes).filter(name => manifest.programs[name]?.enabled === false);

@@ -1,19 +1,16 @@
 import { constants } from "node:fs";
 import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import semver from "semver";
-import type { RegisteredProgram } from "./types.js";
+import { isWithinRoot } from "./path-policy.js";
+import type { ProgramSelection, RegisteredProgram } from "./types.js";
 
-const exec = promisify(execFile);
 const PACKAGE_LIMIT = 1024 * 1024;
 export interface NodeResolution { enabled: boolean; installationRoots?: string[]; }
 export interface NodeVariant { version: string; executable: string; }
-export interface NodeSelection { program: RegisteredProgram; version?: string; requirement?: string; source?: string; }
+export interface NodeSelection { program: RegisteredProgram; selection?: ProgramSelection; }
 
-const inside = (root: string, child: string): boolean => { const part = relative(root, child); return part === "" || (!part.startsWith("..") && !isAbsolute(part)); };
 const version = (value: string): string | undefined => semver.valid(value.trim().replace(/^v/, "")) ?? undefined;
 
 export function parseNodeResolution(value: unknown, path: string): NodeResolution | undefined {
@@ -39,9 +36,16 @@ function roots(configuration: NodeResolution, environment: NodeJS.ProcessEnv, pl
 async function executable(path: string, platform: NodeJS.Platform): Promise<string | undefined> {
   try { await access(path, platform === "win32" ? constants.F_OK : constants.X_OK); return await realpath(path); } catch { return undefined; }
 }
-async function binaryVersion(path: string): Promise<string | undefined> {
-  try { const { stdout } = await exec(path, ["--version"], { timeout: 2_000, windowsHide: true, maxBuffer: 128 }); return version(stdout); } catch { return undefined; }
+
+function layoutVersion(root: string, executablePath: string, platform: NodeJS.Platform): string | undefined {
+  const relativeSegments = relative(root, executablePath).split(/[\\/]+/).filter(Boolean);
+  const binary = platform === "win32" ? "node.exe" : "node";
+  const nvm = relativeSegments.length === 3 && relativeSegments[1] === "bin" && relativeSegments[2]?.toLowerCase() === binary;
+  const fnm = relativeSegments.length === 4 && relativeSegments[1] === "installation" && relativeSegments[2] === "bin" && relativeSegments[3]?.toLowerCase() === binary;
+  const windowsNvm = platform === "win32" && relativeSegments.length === 2 && relativeSegments[1]?.toLowerCase() === binary;
+  return nvm || fnm || windowsNvm ? version(relativeSegments[0]!) : undefined;
 }
+
 async function scan(root: string, platform: NodeJS.Platform): Promise<NodeVariant[]> {
   const found: NodeVariant[] = [];
   async function visit(directory: string, depth: number): Promise<void> {
@@ -51,14 +55,15 @@ async function scan(root: string, platform: NodeJS.Platform): Promise<NodeVarian
       const path = join(directory, entry.name);
       if (entry.isDirectory()) await visit(path, depth + 1);
       else if ((entry.isFile() || entry.isSymbolicLink()) && entry.name.toLowerCase() === (platform === "win32" ? "node.exe" : "node")) {
-        const actual = await executable(path, platform); if (!actual) continue;
-        let candidate = dirname(path); let known: string | undefined;
-        for (let index = 0; index < 4 && !known; index++, candidate = dirname(candidate)) known = version(basename(candidate));
-        const resolved = known ?? await binaryVersion(actual); if (resolved) found.push({ version: resolved, executable: actual });
+        const candidate = layoutVersion(root, path, platform);
+        if (!candidate) continue;
+        const actual = await executable(path, platform);
+        if (actual) found.push({ version: candidate, executable: actual });
       }
     }
   }
-  await visit(root, 0); return found;
+  await visit(root, 0);
+  return found;
 }
 
 export async function discoverNodeVariants(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<readonly NodeVariant[]> {
@@ -70,7 +75,7 @@ export async function discoverNodeVariants(configuration: NodeResolution, enviro
 }
 
 async function file(path: string, limit: number): Promise<string | undefined> {
-  try { if ((await lstat(path)).isSymbolicLink()) return undefined; const data = await readFile(path, "utf8"); return Buffer.byteLength(data) <= limit ? data : undefined; } catch { return undefined; }
+  try { if (!(await lstat(path)).isFile()) return undefined; const data = await readFile(path, "utf8"); return Buffer.byteLength(data) <= limit ? data : undefined; } catch { return undefined; }
 }
 function packageRequirement(text: string): { requirement: string; source: string } | undefined {
   try {
@@ -91,16 +96,17 @@ async function declaration(directory: string): Promise<{ requirement: string; so
 }
 export async function projectNodeSelection(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram): Promise<NodeSelection> {
   let directory = cwd;
-  while (inside(root, directory)) {
+  while (isWithinRoot(root, directory)) {
     const found = await declaration(directory);
     if (found) {
       const requirement = found.requirement.trim();
-      if (["lts/*", "node", "stable"].includes(requirement.toLowerCase()) || !semver.validRange(requirement)) throw new Error(`NODE_VERSION_REQUIREMENT_INVALID: ${found.source}: ${requirement}`);
+      if (["lts/*", "node", "stable"].includes(requirement.toLowerCase()) || !semver.validRange(requirement)) throw new Error(`NODE_VERSION_REQUIREMENT_INVALID: ${found.source}`);
       const selected = variants.find(item => semver.satisfies(item.version, requirement, { includePrerelease: /-/.test(requirement) }));
-      if (!selected) throw new Error(`NODE_VERSION_UNAVAILABLE: ${requirement}`);
-      return { program: { ...fallback, executable: selected.executable, declaredCandidate: selected.executable, kind: "native", argumentSemantics: "literal" }, version: selected.version, requirement, source: found.source };
+      if (!selected) throw new Error(`NODE_VERSION_UNAVAILABLE: ${found.source}`);
+      return { program: { ...fallback, executable: selected.executable, kind: "native", argumentSemantics: "literal" }, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement, source: found.source } };
     }
-    if (directory === root) break; const parent = dirname(directory); if (parent === directory) break; directory = parent;
+    if (directory === root) break;
+    const parent = dirname(directory); if (parent === directory) break; directory = parent;
   }
   return { program: fallback };
 }

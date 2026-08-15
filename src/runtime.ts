@@ -1,9 +1,10 @@
 import { realpath, stat } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, relative, resolve, join } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { ArtifactStore, type ArtifactPolicy, type ArtifactStatus, type OutputEncoding, type OutputPage, type OutputStream } from "./artifact.js";
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
+import { isWithinRoot } from "./path-policy.js";
 import { parseManifestProbes } from "./manifest-probes.js";
 import { discoverNodeVariants, parseNodeResolution, projectNodeSelection, withNodePath, type NodeResolution, type NodeVariant } from "./node-resolution.js";
 import { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, validateRuntimeLimits } from "./config.js";
@@ -106,7 +107,6 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)), nodeResolution: parseNodeResolution(override.nodeResolution ?? root.nodeResolution, `manifest.platforms.${platform}.nodeResolution`) };
 }
 
-function isInside(root: string, candidate: string): boolean { const child = relative(root, candidate); return child === "" || (!child.startsWith("..") && !isAbsolute(child)); }
 function get(environment: Record<string, string>, key: string, platform: NodeJS.Platform): string | undefined { return platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1] : environment[key]; }
 function set(environment: Record<string, string>, key: string, value: string, platform: NodeJS.Platform): void { const actual = platform === "win32" ? Object.keys(environment).find(existing => existing.toLowerCase() === key.toLowerCase()) ?? key : key; environment[actual] = value; }
 function remove(environment: Record<string, string>, key: string, platform: NodeJS.Platform): void { for (const existing of Object.keys(environment)) if (platform !== "win32" ? existing === key : existing.toLowerCase() === key.toLowerCase()) delete environment[existing]; }
@@ -130,7 +130,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   const maxConcurrentExecutions = options.maxConcurrentExecutions ?? DEFAULT_MAX_CONCURRENT_EXECUTIONS;
   const platform = options.platform ?? process.platform;
   const physicalRoots = [...new Set(await Promise.all(options.roots.map(async root => { const physical = await realpath(root); if (!(await stat(physical)).isDirectory()) throw new Error("ROOT_NOT_DIRECTORY"); return physical; })))];
-  const roots = physicalRoots.filter(root => !physicalRoots.some(other => other !== root && isInside(other, root)));
+  const roots = physicalRoots.filter(root => !physicalRoots.some(other => other !== root && isWithinRoot(other, root)));
   const rootIdentities = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; }));
   const input = Object.freeze(Object.fromEntries(Object.entries(options.environment ?? process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)));
   const configured = options.manifest !== undefined;
@@ -162,7 +162,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   let closing = false;
   let closePromise: Promise<void> | undefined;
   const active = new Map<Promise<ExecuteResult>, AbortController>();
-  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && nodeResolution?.enabled ? { ...definition, resolver: { kind: "node-project", installed: nodeVariants.map(item => ({ ...item })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
+  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && nodeResolution?.enabled ? { ...definition, variantSet: { kind: "node-project", variants: nodeVariants.map(item => ({ ...item })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
   return { async inspectEnvironment() { return snapshot(); }, execute(request) {
     if (closing) return Promise.reject(new Error("RUNTIME_CLOSING"));
     if (active.size >= maxConcurrentExecutions) return Promise.reject(new Error("CONCURRENCY_LIMIT"));
@@ -180,15 +180,15 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       if (roots.length > 1 && (request.cwd === undefined || !isAbsolute(request.cwd))) throw new Error("CWD_NOT_ALLOWED");
       const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd;
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
-      if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
-      const selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isInside(root, cwd))!, nodeVariants, definition) : { program: definition };
+      if (!roots.some(root => isWithinRoot(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
+      const selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, definition) : { program: definition };
       const childEnvironment = selection.program.logicalName === "node" && selection.program.executable !== definition.executable ? withNodePath(plan?.programEnvironment(definitions[request.program]!) ?? { ...environment }, selection.program, platform) : plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
       const result = await executeProgram({ program: selection.program, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });
       const wantedArtifact = artifactPolicy === "always" || (artifactPolicy === "on-truncation" && (result.stdout.truncated || result.stderr.truncated)); let artifact: ArtifactStatus = artifactPolicy === "never" ? { status: "not-requested" } : spoolAttemptFailed ? { status: "unavailable" } : { status: "discarded" };
       if (wantedArtifact) { if (!spool || spool.failed) artifact = { status: "unavailable" }; else try { artifact = { status: "published", id: await artifacts.publish(spool) }; spool = undefined; } catch { artifact = { status: "unavailable" }; } }
-      await artifacts.discard(spool); return { ...result, artifact, programSelection: { logicalName: request.program, executable: selection.program.executable, ...(selection.version ? { version: selection.version } : {}), ...(selection.requirement ? { requirement: selection.requirement } : {}), ...(selection.source ? { source: selection.source } : {}) } };
+      await artifacts.discard(spool); return { ...result, artifact, programSelection: selection.selection ?? { logicalName: request.program, executable: selection.program.executable } };
     })();
     active.set(execution, controller);
     return execution.finally(() => { request.signal?.removeEventListener("abort", abort); active.delete(execution); });

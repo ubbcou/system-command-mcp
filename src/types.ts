@@ -1,21 +1,32 @@
 export type ProgramKind = "native" | "cmd-script";
 export type ArgumentSemantics = "literal" | "cmd-reparsed";
 
+/** A concrete executable and version available for a dynamically resolved Logical Program. */
+export interface ProgramVariant { version: string; executable: string; }
+/** The immutable startup snapshot of Program Variants available to a Registered Program. */
+export interface ProgramVariantSet { kind: "node-project"; variants: readonly ProgramVariant[]; fallbackExecutable: string; }
+
 export interface RegisteredProgram {
   logicalName: string;
+  /** Static fallback executable selected from the Program Manifest at startup. */
   executable: string;
+  /** The Manifest Program Candidate that selected the static fallback executable. */
   declaredCandidate: string;
   kind: ProgramKind;
   /** Native executables receive literal argv; cmd scripts are reparsed by cmd.exe. */
   argumentSemantics: ArgumentSemantics;
-  resolver?: { kind: "node-project"; installed: { version: string; executable: string }[]; fallbackExecutable: string };
+  /** Optional immutable startup variants; a request can select one without changing this registration. */
+  variantSet?: ProgramVariantSet;
 }
 
+/** The actual executable selected for one Execution Request. */
 export interface ProgramSelection {
   logicalName: string;
   executable: string;
   version?: string;
+  /** Requirement read from an authorized project's declaration for this request only. */
   requirement?: string;
+  /** Declaration kind, not its path. */
   source?: string;
 }
 
@@ -23,6 +34,7 @@ export interface EnvironmentSnapshot {
   platform: NodeJS.Platform;
   arch: string;
   cwd: string;
+  /** Registered Programs, including any immutable Program Variant Sets. */
   programs: Record<string, RegisteredProgram>;
 }
 
