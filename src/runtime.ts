@@ -156,6 +156,10 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     const kind = /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native";
     programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal" : "cmd-reparsed" }; policies[logicalName] = definition.policy ?? {};
   }
+  if (nodeResolution?.enabled) {
+    if (!programs.node || programs.node.kind !== "native" || definitions.node?.enabled === false) throw new Error("NODE_RESOLUTION_NODE_REQUIRED");
+    if (!nodeVariants.length) throw new Error("NODE_VARIANTS_UNAVAILABLE");
+  }
   if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
   const artifacts = new ArtifactStore(options.artifactDirectory ?? join(tmpdir(), "system-command-mcp-artifacts"), options.artifactRetentionMs ?? 24 * 60 * 60 * 1000, options.artifactQuotaBytes ?? 1024 * 1024 * 1024, options.artifactMaxStreamBytes ?? 100 * 1024 * 1024);
   await artifacts.start();
@@ -172,7 +176,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     if (request.signal?.aborted) abort();
     const execution = (async (): Promise<ExecuteResult & { artifact: ArtifactStatus }> => {
       const definition = programs[request.program]; if (!definition) throw new Error(`PROGRAM_NOT_REGISTERED: ${request.program}`);
-      const args = request.args ?? []; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
+      const args = [...(request.args ?? [])]; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
       if (definition.kind === "cmd-script" && args.some(argument => !cmdScriptArgumentIsSafe(argument))) throw new Error("UNSAFE_CMD_SCRIPT_ARGUMENT");
       try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
       const policy = policies[request.program] ?? {}; const timeoutMs = effectiveTimeoutMs(policy, options.defaultTimeoutMs, request.timeoutMs); if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_DEFAULT_TIMEOUT_MS, MAX_DEFAULT_TIMEOUT_MS)) throw new Error("INVALID_TIMEOUT");
@@ -181,8 +185,19 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       const wanted = request.cwd === undefined ? roots[0]! : roots.length === 1 ? resolve(roots[0]!, request.cwd) : request.cwd;
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isWithinRoot(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
-      const selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, definition) : { program: definition };
-      const childEnvironment = selection.program.logicalName === "node" && selection.program.executable !== definition.executable ? withNodePath(plan?.programEnvironment(definitions[request.program]!) ?? { ...environment }, selection.program, platform) : plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
+      const baseEnvironment = plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
+      let selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, definition) : { program: definition };
+      let childEnvironment: NodeJS.ProcessEnv = baseEnvironment;
+      if ((request.program === "npm" || request.program === "npx") && nodeResolution?.enabled && programs.node) {
+        const nodeSelection = await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, programs.node);
+        if (nodeSelection.variant) {
+          const cli = request.program === "npm" ? nodeSelection.variant.npmCli : nodeSelection.variant.npxCli;
+          if (!cli) throw new Error("PROJECT_NPM_UNAVAILABLE");
+          selection = { program: { ...nodeSelection.program, logicalName: request.program }, selection: { ...nodeSelection.selection!, logicalName: request.program, adapter: "npm-cli" } };
+          args.splice(0, 0, cli);
+          childEnvironment = withNodePath(baseEnvironment, nodeSelection.program, platform);
+        }
+      } else if (selection.program.logicalName === "node" && selection.program.executable !== definition.executable) childEnvironment = withNodePath(baseEnvironment, selection.program, platform);
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
       const result = await executeProgram({ program: selection.program, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });

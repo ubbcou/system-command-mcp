@@ -1,56 +1,68 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
 import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
 
-async function node(root: string, version: string): Promise<void> {
-  const path = join(root, version, "bin", process.platform === "win32" ? "node.exe" : "node");
-  await mkdir(dirname(path), { recursive: true });
-  try { await symlink(execPath, path, process.platform === "win32" ? "file" : undefined); } catch { await writeFile(path, "fixture"); if (process.platform !== "win32") await chmod(path, 0o755); }
+const binaryName = process.platform === "win32" ? "node.exe" : "node";
+async function node(root: string, version: string, npm = true): Promise<void> {
+  const path = join(root, version, "bin", binaryName);
+  await mkdir(dirname(path), { recursive: true }); await cp(execPath, path); if (process.platform !== "win32") await chmod(path, 0o755);
+  if (npm) { const cli = join(root, version, "node_modules", "npm", "bin"); await mkdir(cli, { recursive: true }); await writeFile(join(cli, "npm-cli.js"), "console.log(process.version, process.argv.slice(2).join(','))"); await writeFile(join(cli, "npx-cli.js"), "console.log(process.version, process.argv.slice(2).join(','))"); }
 }
+function manifest(root: string, programs: Record<string, unknown> = { node: { candidates: [execPath], required: true } }) { return { version: 1, nodeResolution: { enabled: true, installationRoots: [root] }, allowInheritedPath: true, programs }; }
 
-function manifest(root: string) {
-  return { version: 1, nodeResolution: { enabled: true, installationRoots: [root] }, allowInheritedPath: true, programs: { node: { candidates: [execPath], required: true } } };
-}
+async function runtime(root: string, programs?: Record<string, unknown>) { return createCommandRuntime({ roots: [root], environment: { Path: dirname(execPath), PATH: dirname(execPath) }, manifest: manifest(root, programs) }); }
 
 test("node resolver selects nearest declaration, highest satisfying version, and observes changes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-"));
-  await node(root, "v20.1.0"); await node(root, "v22.2.0");
-  const project = join(root, "project", "nested"); await mkdir(project, { recursive: true });
-  await writeFile(join(root, "project", ".nvmrc"), "^20"); await writeFile(join(project, ".node-version"), "22.2.0");
-  const runtime = await createCommandRuntime({ roots: [root], environment: { Path: dirname(execPath), PATH: dirname(execPath) }, manifest: manifest(root) });
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-")); await node(root, "v20.1.0"); await node(root, "v22.2.0");
+  const project = join(root, "project", "nested"); await mkdir(project, { recursive: true }); await writeFile(join(root, "project", ".nvmrc"), "^20"); await writeFile(join(project, ".node-version"), "22.2.0");
+  const instance = await runtime(root);
   try {
-    let result = await runtime.execute({ program: "node", args: ["--version"], cwd: project, timeoutMs: 1_000 });
-    assert.equal(result.programSelection?.version, "22.2.0"); assert.equal(result.programSelection?.source, ".node-version");
-    await writeFile(join(project, ".node-version"), "^20"); result = await runtime.execute({ program: "node", args: ["--version"], cwd: project, timeoutMs: 1_000 });
-    assert.equal(result.programSelection?.version, "20.1.0");
-    await writeFile(join(project, ".node-version"), "lts/* secret-requirement"); await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: project, timeoutMs: 1_000 }), error => { assert.ok(error instanceof Error); assert.match(error.message, /NODE_VERSION_REQUIREMENT_INVALID: \.node-version/); assert.doesNotMatch(error.message, /secret-requirement/); return true; });
-    await writeFile(join(project, ".node-version"), ">=99.0.0 <100.0.0"); await assert.rejects(runtime.execute({ program: "node", args: ["--version"], cwd: project, timeoutMs: 1_000 }), error => { assert.ok(error instanceof Error); assert.match(error.message, /NODE_VERSION_UNAVAILABLE: \.node-version/); assert.doesNotMatch(error.message, />=99\.0\.0/); return true; });
-  } finally { await runtime.close(); await rm(root, { recursive: true, force: true }); }
+    let result = await instance.execute({ program: "node", args: ["--version"], cwd: project, timeoutMs: 1_000 }); assert.equal(result.programSelection?.version, "22.2.0"); assert.equal(result.programSelection?.source, ".node-version");
+    await writeFile(join(project, ".node-version"), "^20"); result = await instance.execute({ program: "node", args: ["--version"], cwd: project, timeoutMs: 1_000 }); assert.equal(result.programSelection?.version, "20.1.0");
+    await writeFile(join(project, ".node-version"), "lts/* secret-requirement"); await assert.rejects(instance.execute({ program: "node", args: ["--version"], cwd: project }), /NODE_VERSION_REQUIREMENT_INVALID: \.node-version/);
+    await writeFile(join(project, ".node-version"), ">=99.0.0 <100.0.0"); await assert.rejects(instance.execute({ program: "node", args: ["--version"], cwd: project }), /NODE_VERSION_UNAVAILABLE: \.node-version/);
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("node discovery never runs an unknown-layout executable", async (t) => {
-  if (process.platform === "win32") return t.skip("fixture is a POSIX executable");
-  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-untrusted-"));
-  const marker = join(root, "marker");
-  const binary = join(root, "untrusted", "v99.0.0", "bin", "node");
-  await mkdir(dirname(binary), { recursive: true });
-  await writeFile(binary, `#!/bin/sh\nprintf executed > "${marker}"\n`); await chmod(binary, 0o755);
-  const runtime = await createCommandRuntime({ roots: [root], environment: { PATH: dirname(execPath) }, manifest: manifest(root) });
-  try {
-    const environment = await runtime.inspectEnvironment();
-    assert.deepEqual(environment.programs.node?.variantSet?.variants, []);
-    await assert.rejects(readFile(marker));
-  } finally { await runtime.close(); await rm(root, { recursive: true, force: true }); }
+test("discovery does not execute unknown layouts and rejects realpath escape", async (t) => {
+  if (process.platform === "win32") return t.skip("symlink fixture needs elevated privilege on this host");
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-untrusted-")); const marker = join(root, "marker"); const binary = join(root, "untrusted", "v99.0.0", "bin", "node"); await mkdir(dirname(binary), { recursive: true }); await writeFile(binary, `#!/bin/sh\nprintf executed > "${marker}"\n`); await chmod(binary, 0o755);
+  const escaped = join(root, "v22.0.0", "bin", "node"); await mkdir(dirname(escaped), { recursive: true }); await symlink(execPath, escaped);
+  const instance = await runtime(root);
+  try { assert.deepEqual((await instance.inspectEnvironment()).programs.node?.variantSet?.variants, []); await assert.rejects(readFile(marker)); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("node resolver parses strict manifest fields and falls back without a declaration", async () => {
+test("declaration files fail closed and precedence does not bypass invalid files", async (t) => {
+  if (process.platform === "win32") return t.skip("symlink fixture needs elevated privilege on this host");
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-declarations-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); const instance = await runtime(root);
+  try {
+    for (const [name, content] of [[".nvmrc", ""], [".node-version", "x"], ["package.json", "{"]] as [string, string][]) { await rm(join(project, ".nvmrc"), { force: true }); await rm(join(project, ".node-version"), { force: true }); await rm(join(project, "package.json"), { force: true }); await writeFile(join(project, name), content); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_(DECLARATION|VERSION_REQUIREMENT)_INVALID/); }
+    await rm(join(project, "package.json")); await writeFile(join(project, ".node-version"), "22"); await symlink(join(root, "outside"), join(project, ".nvmrc")); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_DECLARATION_INVALID: \.nvmrc/);
+    await rm(join(project, ".nvmrc")); await writeFile(join(project, "package.json"), "x".repeat(1024 * 1024 + 1)); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_DECLARATION_INVALID: package.json/);
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("node resolution requires a native node fallback and variants", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-startup-"));
+  try {
+    await assert.rejects(runtime(root), /NODE_VARIANTS_UNAVAILABLE/);
+    await node(root, "v22.2.0"); await assert.rejects(runtime(root, { npm: { candidates: [execPath], required: true } }), /NODE_RESOLUTION_NODE_REQUIRED/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("npm and npx use the project node pair; missing pair fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-npm-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); await writeFile(join(project, ".nvmrc"), "22");
+  const instance = await runtime(root, { node: { candidates: [execPath], required: true }, npm: { candidates: [execPath], required: true }, npx: { candidates: [execPath], required: true } });
+  try { const result = await instance.execute({ program: "npm", args: ["one", "two"], cwd: project }); assert.match(result.stdout.text, /v22\.20\.0 one,two/); assert.equal(result.programSelection?.adapter, "npm-cli"); assert.equal(result.programSelection?.executable, join(root, "v22.2.0", "bin", binaryName)); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+  const missing = await mkdtemp(join(tmpdir(), "system-command-mcp-node-npm-missing-")); await node(missing, "v22.2.0", false); const missingProject = join(missing, "project"); await mkdir(missingProject); await writeFile(join(missingProject, ".nvmrc"), "22"); const unavailable = await runtime(missing, { node: { candidates: [execPath], required: true }, npm: { candidates: [execPath], required: true } });
+  try { await assert.rejects(unavailable.execute({ program: "npm", cwd: missingProject }), /PROJECT_NPM_UNAVAILABLE/); } finally { await unavailable.close(); await rm(missing, { recursive: true, force: true }); }
+});
+
+test("node resolver parses strict manifest fields", () => {
   assert.throws(() => parseProgramManifest({ version: 1, nodeResolution: { enabled: true, unexpected: true }, programs: {} }), /unknown field/);
   assert.throws(() => parseProgramManifest({ version: 1, nodeResolution: { installationRoots: ["relative"] }, programs: {} }), /installationRoots/);
-  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-fallback-"));
-  const runtime = await createCommandRuntime({ roots: [root], environment: {}, manifest: { version: 1, nodeResolution: { enabled: true, installationRoots: [] }, programs: { node: { candidates: [execPath], required: true } } } });
-  try { const fallback = (await runtime.inspectEnvironment()).programs.node!.executable; const result = await runtime.execute({ program: "node", args: ["--version"], cwd: root, timeoutMs: 1_000 }); assert.equal(result.programSelection?.executable, fallback); assert.equal(result.programSelection?.version, undefined); } finally { await runtime.close(); await rm(root, { recursive: true, force: true }); }
 });

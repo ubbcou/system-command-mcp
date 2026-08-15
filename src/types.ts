@@ -2,7 +2,7 @@ export type ProgramKind = "native" | "cmd-script";
 export type ArgumentSemantics = "literal" | "cmd-reparsed";
 
 /** A concrete executable and version available for a dynamically resolved Logical Program. */
-export interface ProgramVariant { version: string; executable: string; }
+export interface ProgramVariant { version: string; executable: string; npmCli?: string; npxCli?: string; }
 /** The immutable startup snapshot of Program Variants available to a Registered Program. */
 export interface ProgramVariantSet { kind: "node-project"; variants: readonly ProgramVariant[]; fallbackExecutable: string; }
 
@@ -28,6 +28,8 @@ export interface ProgramSelection {
   requirement?: string;
   /** Declaration kind, not its path. */
   source?: string;
+  /** Adapter used to launch a logical program through another executable. */
+  adapter?: "npm-cli";
 }
 
 export interface EnvironmentSnapshot {
