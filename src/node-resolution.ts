@@ -9,6 +9,7 @@ import type { ProgramSelection, RegisteredProgram } from "./types.js";
 const PACKAGE_LIMIT = 1024 * 1024;
 const VERSION_FILE_LIMIT = 4096;
 export interface NodeResolution { enabled: boolean; installationRoots?: string[]; }
+export interface ProjectNodeResolution { enabledRoots: string[]; installationRoots: string[]; defaultVersion?: string; }
 type NodeIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint };
 export interface NodeVariant { version: string; versionDirectory: string; versionDirectoryIdentity: NodeIdentity; executable: string; executableIdentity: NodeIdentity; npmCli?: string; npmCliIdentity?: NodeIdentity; npxCli?: string; npxCliIdentity?: NodeIdentity; }
 export interface NodeSelection { program: RegisteredProgram; selection?: ProgramSelection; variant?: NodeVariant; }
@@ -24,6 +25,21 @@ export function parseNodeResolution(value: unknown, path: string): NodeResolutio
   if (item.enabled !== undefined && typeof item.enabled !== "boolean") throw new Error(`INVALID_MANIFEST: ${path}.enabled`);
   if (item.installationRoots !== undefined && (!Array.isArray(item.installationRoots) || !item.installationRoots.every(root => typeof root === "string" && (isAbsolute(root) || root.startsWith("~/"))))) throw new Error(`INVALID_MANIFEST: ${path}.installationRoots`);
   return { enabled: item.enabled ?? false, installationRoots: item.installationRoots === undefined ? undefined : [...item.installationRoots as string[]] };
+}
+
+export function parseProjectNodeResolution(value: unknown, path: string): ProjectNodeResolution | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`INVALID_MANIFEST: ${path} must be an object`);
+  const item = value as Record<string, unknown>;
+  for (const key of Object.keys(item)) if (!['enabledRoots', 'installationRoots', 'defaultVersion'].includes(key)) throw new Error(`INVALID_MANIFEST: unknown field ${path}.${key}`);
+  const paths = (key: 'enabledRoots' | 'installationRoots'): string[] => {
+    const entries = item[key];
+    if (!Array.isArray(entries) || !entries.length || !entries.every(root => typeof root === 'string' && (isAbsolute(root) || root.startsWith('~/')))) throw new Error(`INVALID_MANIFEST: ${path}.${key}`);
+    return [...entries];
+  };
+  const defaultVersion = item.defaultVersion;
+  if (defaultVersion !== undefined && (typeof defaultVersion !== 'string' || !version(defaultVersion))) throw new Error(`INVALID_MANIFEST: ${path}.defaultVersion`);
+  return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: defaultVersion === undefined ? undefined : version(defaultVersion)! };
 }
 
 function roots(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
@@ -166,6 +182,43 @@ async function declaration(directory: string): Promise<Declaration | undefined> 
   if (pkg !== undefined) { const found = packageRequirement(pkg); if (found?.source !== "package.json#engines.node") return found; }
   for (const name of [".nvmrc", ".node-version"]) { const text = await declarationFile(join(directory, name), name, VERSION_FILE_LIMIT); if (text !== undefined) { if (!text.trim()) requirementError(name); return { requirement: text.trim(), source: name }; } }
   return pkg === undefined ? undefined : packageRequirement(pkg);
+}
+
+export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, defaultVersion?: string): Promise<NodeSelection> {
+  let directory = cwd;
+  const ranges: Declaration[] = [];
+  let nearestExact: Declaration[] | undefined;
+  while (isWithinRoot(root, directory)) {
+    const pkg = await declarationFile(join(directory, 'package.json'), 'package.json', PACKAGE_LIMIT);
+    const exact: Declaration[] = [];
+    if (pkg !== undefined) {
+      let parsed: Record<string, unknown>;
+      try { const value: unknown = JSON.parse(pkg); if (!value || typeof value !== 'object' || Array.isArray(value)) declarationError('package.json'); parsed = value as Record<string, unknown>; } catch (error) { if (error instanceof Error && error.message.startsWith('NODE_DECLARATION_INVALID:')) throw error; return declarationError('package.json'); }
+      const dev = parsed.devEngines;
+      if (dev !== undefined) { if (!dev || typeof dev !== 'object' || Array.isArray(dev)) declarationError('package.json#devEngines.runtime'); const runtime = (dev as Record<string, unknown>).runtime; const entry = Array.isArray(runtime) ? runtime.find(x => !!x && typeof x === 'object' && !Array.isArray(x) && (x as Record<string, unknown>).name === 'node') : runtime; if (entry !== undefined) { if (!entry || typeof entry !== 'object' || Array.isArray(entry) || (entry as Record<string, unknown>).name !== 'node' || typeof (entry as Record<string, unknown>).version !== 'string') declarationError('package.json#devEngines.runtime'); exact.push({ requirement: (entry as Record<string, unknown>).version as string, source: 'package.json#devEngines.runtime' }); } }
+      const volta = parsed.volta;
+      if (volta !== undefined) { if (!volta || typeof volta !== 'object' || Array.isArray(volta)) declarationError('package.json#volta.node'); const found = (volta as Record<string, unknown>).node; if (found !== undefined) { if (typeof found !== 'string') declarationError('package.json#volta.node'); exact.push({ requirement: found, source: 'package.json#volta.node' }); } }
+      const engines = parsed.engines;
+      if (engines !== undefined) { if (!engines || typeof engines !== 'object' || Array.isArray(engines)) declarationError('package.json#engines.node'); const found = (engines as Record<string, unknown>).node; if (found !== undefined) { if (typeof found !== 'string' || !semver.validRange(found)) declarationError('package.json#engines.node'); ranges.push({ requirement: found, source: 'package.json#engines.node' }); } }
+    }
+    for (const name of ['.nvmrc', '.node-version']) { const text = await declarationFile(join(directory, name), name, VERSION_FILE_LIMIT); if (text !== undefined) exact.push({ requirement: text.trim(), source: name }); }
+    if (exact.length && !nearestExact) nearestExact = exact;
+    if (directory === root) break;
+    const parent = dirname(directory); if (parent === directory) break; directory = parent;
+  }
+  if (nearestExact) {
+    const normalized = nearestExact.map(found => ({ ...found, requirement: version(found.requirement) }));
+    if (normalized.some(found => !found.requirement) || new Set(normalized.map(found => found.requirement)).size !== 1) throw new Error('PROJECT_NODE_DECLARATION_CONFLICT');
+    const found = normalized[0]!; const selected = variants.find(item => item.version === found.requirement);
+    if (!selected) throw new Error(`PROJECT_NODE_VERSION_UNAVAILABLE: ${found.source}`);
+    if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
+    return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: found.source } };
+  }
+  if (!defaultVersion) return { program: fallback };
+  const selected = variants.find(item => item.version === defaultVersion);
+  if (!selected) throw new Error('PROJECT_NODE_VERSION_UNAVAILABLE: manifest#projectNode.defaultVersion');
+  if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
+  return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'manifest#projectNode.defaultVersion' } };
 }
 
 export async function projectNodeSelection(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram): Promise<NodeSelection> {
