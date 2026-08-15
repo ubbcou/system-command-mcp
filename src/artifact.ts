@@ -19,6 +19,7 @@ export class ArtifactStore {
   private readonly runtimeId = randomBytes(16).toString("hex");
   private readonly spools = new Set<ArtifactSpool>();
   private heartbeat: NodeJS.Timeout | undefined;
+  private closeCleanup: Promise<void> | undefined;
   private closed = false;
   private unavailable = false;
   constructor(private readonly directory: string, private readonly retentionMs: number, private readonly quotaBytes: number, private readonly maxStreamBytes = 100 * 1024 * 1024) {}
@@ -70,9 +71,13 @@ export class ArtifactStore {
   async discard(spool: ArtifactSpool | undefined): Promise<void> { await spool?.remove(); }
   async close(deadlineMs = LOCK_WAIT_MS): Promise<void> {
     this.closed = true;
-    if (this.heartbeat) clearInterval(this.heartbeat);
-    const cleanup = Promise.all([...this.spools].map(spool => spool.remove())).then(() => {});
-    await Promise.race([cleanup, delay(Math.max(0, deadlineMs))]);
+    if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
+    if (this.closeCleanup) { await this.closeCleanup; return; }
+    const cleanup = this.closeCleanup = Promise.all([...this.spools].map(spool => spool.remove())).then(() => {}, () => {});
+    let deadline: NodeJS.Timeout | undefined;
+    const expires = new Promise<void>(resolve => { deadline = setTimeout(resolve, Math.max(0, deadlineMs)); deadline.unref(); });
+    await Promise.race([cleanup, expires]);
+    if (deadline) clearTimeout(deadline);
   }
   async read(id: string, stream: OutputStream, offset: number, limit: number, encoding: OutputEncoding): Promise<OutputPage> {
     if (!validId.test(id)) throw new Error("ARTIFACT_NOT_FOUND");
