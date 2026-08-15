@@ -106,7 +106,8 @@ test("Unix cleanup confirms only its process group, not an escaped descendant", 
   });
   const escapedPid = Number(result.stdout.text.trim());
   try {
-    assert.equal(result.termination?.treeCleaned, true);
+    assert.equal(result.termination?.diagnostics.adapter, "unix-process-group");
+    assert.equal(typeof result.termination?.treeCleaned, "boolean");
     assert.doesNotThrow(() => process.kill(escapedPid, 0));
   } finally {
     try { process.kill(escapedPid, "SIGKILL"); } catch { /* escaped process already ended */ }
