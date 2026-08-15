@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "allowInheritedPath": false,
+  "programs": {
+    "git": {
+      "candidates": [
+        "C:\\Program Files\\Git\\cmd\\git.exe"
+      ],
+      "required": false
+    },
+    "node": {
+      "candidates": [
+        "C:\\Users\\ubbco\\AppData\\Roaming\\nvm\\v22.20.0\\node.exe"
+      ],
+      "required": false
+    },
+    "npm": {
+      "candidates": [
+        "C:\\Users\\ubbco\\AppData\\Roaming\\nvm\\v22.20.0\\npm.cmd"
+      ],
+      "required": false
+    },
+    "pnpm": {
+      "candidates": [
+        "C:\\Users\\ubbco\\AppData\\Roaming\\nvm\\v22.20.0\\pnpm.cmd"
+      ],
+      "required": false
+    },
+    "yarn": {
+      "candidates": [
+        "C:\\Users\\ubbco\\AppData\\Roaming\\nvm\\v22.20.0\\yarn.cmd"
+      ],
+      "required": false
+    }
+  }
+}
