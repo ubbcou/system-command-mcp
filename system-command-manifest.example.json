@@ -1,9 +1,48 @@
 {
-  "version": 1,
-  "allowInheritedPath": true,
-  "nodeResolution": { "enabled": true },
+  "version": 2,
+  "allowInheritedPath": false,
+  "searchPath": ["./tools/bin"],
+  "projectNode": {
+    "enabledRoots": ["~/src"],
+    "installationRoots": ["~/.nvm/versions/node", "~/.local/share/fnm/node-versions"],
+    "defaultVersion": "22.14.0"
+  },
   "programs": {
-    "git": { "candidates": ["git"], "required": true },
-    "node": { "candidates": ["node"], "required": false, "policy": { "maxTimeoutMs": 60000 } }
+    "git": {
+      "candidates": ["C:/Program Files/Git/cmd/git.exe", "/opt/homebrew/bin/git"],
+      "required": true
+    },
+    "node": {
+      "candidates": ["C:/Program Files/nodejs/node.exe", "/opt/homebrew/bin/node"],
+      "required": true,
+      "policy": { "maxTimeoutMs": 60000 }
+    },
+    "npm": {
+      "candidates": ["C:/Program Files/nodejs/npm.cmd", "/opt/homebrew/bin/npm"],
+      "required": false
+    },
+    "npx": {
+      "candidates": ["C:/Program Files/nodejs/npx.cmd", "/opt/homebrew/bin/npx"],
+      "required": false
+    }
+  },
+  "platforms": {
+    "win32": {
+      "searchPath": ["C:/Windows/System32"],
+      "pathExt": ".COM;.EXE;.BAT;.CMD",
+      "projectNode": {
+        "enabledRoots": ["C:/Users/example/src"],
+        "installationRoots": ["C:/Users/example/AppData/Roaming/nvm"],
+        "defaultVersion": "22.14.0"
+      }
+    },
+    "darwin": {
+      "searchPath": ["/opt/homebrew/bin", "/usr/bin"],
+      "projectNode": {
+        "enabledRoots": ["/Users/example/src"],
+        "installationRoots": ["/Users/example/.nvm/versions/node"],
+        "defaultVersion": "22.14.0"
+      }
+    }
   }
 }
