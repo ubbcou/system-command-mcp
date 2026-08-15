@@ -1,6 +1,6 @@
 export { createServer } from "./server.js";
 export { executeProgram } from "./execute.js";
-export { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
+export { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
 export { createCommandRuntime, parseProgramManifest } from "./runtime.js";
 export { codexSnippet, discoveredManifest, dshSnippet, doctor, readManifest, writeManifestTemplate } from "./management.js";
 export { parseManifestProbes } from "./manifest-probes.js";

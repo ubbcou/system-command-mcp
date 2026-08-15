@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { ArtifactStore, type ArtifactPolicy, type ArtifactStatus, type OutputEncoding, type OutputPage, type OutputStream } from "./artifact.js";
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
+import { parseManifestProbes } from "./manifest-probes.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
 
 export interface ProgramPolicy { defaultTimeoutMs?: number; maxTimeoutMs?: number; allowStdin?: boolean; gracePeriodMs?: number; finalTerminationWaitMs?: number; artifactPolicy?: ArtifactPolicy; }
@@ -75,6 +76,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
     return [name, program(definition, `manifest.programs.${name}`) as ManifestProgram];
   }));
   for (const [name, definition] of Object.entries(programs)) { if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`); validatePolicy(definition.policy, `manifest.programs.${name}.policy`); }
+  parseManifestProbes(value);
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
   const platformOverrides: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(platforms)) {

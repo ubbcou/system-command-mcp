@@ -1,12 +1,12 @@
 # system-command-mcp
 
-跨平台系统命令 MCP Server。AI 使用稳定的 `program + args[]` 接口调用已注册程序，不需要选择 Bash、PowerShell 或 cmd.exe，也不需要用 `which`、`where`、`command -v`、`Get-Command` 探测工具。
+跨平台系统命令 MCP Server。AI 通过稳定的 `program + args[]` 接口直接调用已注册程序，无需用 `which`、`where`、`command -v` 或 `Get-Command` 探测工具；它不是 Shell，自动发现程序集也明确不包括 PowerShell。
 
 ## 工具
 
 ### system_exec
 
-`program` 枚举在 Server 启动时根据当前 `PATH` 自动生成：
+`program` 是启动时注册的逻辑程序名；其 Schema 已枚举可用项：
 
 ```json
 {
@@ -17,11 +17,15 @@
 }
 ```
 
-参数不会经过 Shell 展开，`$HOME`、`*.ts`、`&&` 等会原样传递。
+对原生可执行文件，`args` 是逐项传递的字面量参数，不经过 Shell 展开或组合；例如 `$HOME`、`*.ts` 和 `&&` 都只是参数文本。Windows 的 `.cmd` / `.bat` 平台包装程序例外：它们会由 `cmd.exe` 重新解析，且参数中拒绝 `%`、`!`、`&`、`|`、`<`、`>`、`^`、CR、LF 和 NUL；即使被接受，参数保真度也比原生程序更窄。用 `system_environment` 的 `argumentSemantics` 区分 `literal` 与 `cmd-reparsed`。
 
 ### system_environment
 
-返回平台、架构、根工作目录，以及逻辑程序名到真实可执行文件的映射。通常无需先调用；`system_exec.program` 的 Schema 已包含可用程序。
+返回平台、架构、根工作目录、模式、Roots，以及逻辑程序名到真实可执行文件的映射（包括 `kind` 和 `argumentSemantics`）。通常无需先调用；`system_exec.program` 的 Schema 已包含可用程序。
+
+### system_output
+
+以 Execution Artifact 的不透明 `id` 分页读取已完成执行的 `stdout` 或 `stderr` 原始输出。Artifact 不是主机文件路径，不能用主机文件系统工具读取。
 
 ## 构建和测试
 
@@ -36,7 +40,7 @@ npm test
 ## 管理 CLI 与 MCP 配置
 
 ```bash
-# 发现固定的非 Shell 常用程序集；--yes 使用全部可用程序作为 Optional，且不会修改 Codex 或 DSH 配置
+# 发现固定的默认自动程序集；--yes 将每个已发现程序写为 Optional，且不会修改 Codex 或 DSH 配置
 system-command-mcp init --yes --manifest system-command-manifest.json
 # 已有 Manifest 默认拒绝覆盖；仅 --force 可以替换
 system-command-mcp init --yes --force --manifest system-command-manifest.json
@@ -59,20 +63,21 @@ Manifest Schema 和示例分别为 `system-command-manifest.schema.json`、`syst
 - 读写和枚举文件使用宿主文件系统工具；
 - Root 只验证执行进程的 cwd，**不是**文件系统沙箱，也不会限制已启动程序能访问的文件。
 
-## 默认逻辑程序名
+## 自动发现的逻辑程序
+
+未提供 Manifest 时，自动发现模式仅尝试注册以下逻辑程序，并且只暴露启动环境中实际可解析的程序：
 
 - git、node、npm、pnpm、yarn、bun
-- python：依次解析 python3、python
-- ripgrep：解析 rg
-- powershell：依次解析 pwsh、powershell
+- python：依次尝试 `python3`、`python`
+- ripgrep：尝试 `rg`
 
-只暴露当前环境实际存在的程序。
+**不自动发现或暴露 PowerShell（`pwsh` / `powershell`）。** 自动发现是向后兼容的零配置模式；它使用继承环境，不能承诺不同宿主间的一致程序身份。`init` 生成的 Manifest 会将上述已发现程序固定为绝对候选路径；配置模式则只注册 Manifest 声明的程序，且默认不继承 `PATH`，除非设置 `allowInheritedPath: true`。
 
-## 当前限制
+## 当前限制与生命周期
 
-- 仅支持 stdio transport；
-- 不支持管道、重定向、任意 Shell 脚本、交互式 TTY 或后台常驻进程；
-- 默认超时 30 秒，stdout/stderr 分别保留最后 1 MiB；
-- cwd 必须位于 --root 内；
-- 程序快照在启动时生成，环境变化后需重启 Server；
-- 超时和取消只保证终止直接子进程，不保证清理完整进程树。
+- 仅支持 stdio transport；不支持 Shell 命令字符串、管道、重定向、展开、命令替换或其他 Shell 组合。需要这些语义时，使用宿主 Shell；读写和枚举文件时，使用宿主文件系统工具。
+- 执行是有限且非交互式的：不支持 TTY、后台任务或常驻进程。进程成功启动后的非零退出、超时和取消均返回结构化 Execution Result，而不是 MCP 工具错误。
+- 默认超时为 30 秒。`stdout` 和 `stderr` 分别保留最多 1 MiB 的 UTF-8 诊断投影：未截断时保留完整内容；截断时保留头部和尾部，并报告省略的字节数。完整流可按 Program Policy 作为 Execution Artifact 保存：`never` 不请求、`on-truncation`（默认）仅在任一流截断时发布、`always` 每次发布。Artifact 可能因存储不可用、配额或流大小上限而不可用，并受保留期和配额清理；只能在执行完成后通过 `system_output` 和不透明 id 读取。
+- cwd 必须在授权的 `--root` 内；多个 Root 时 cwd 必须为授权树内的绝对路径。Root 只验证进程从哪里启动，**不是**文件系统沙箱，也不限制已启动程序可访问的文件。
+- 程序和执行环境在启动时生成快照；自动发现环境或 Manifest 配置的变化都需要重启 Server 才会生效。
+- 超时、取消和 Server 关闭会尝试终止整个 Process Tree，并在结构化 `termination` 字段中报告结果。Unix 使用进程组，后代若另建 session 或进程组会逃逸；Windows 使用每请求 Job Object（禁止 breakaway），但进程创建到加入 Job Object 之间存在无法验证的竞态，早期后代可能逃逸。Windows 无通用的优雅树终止，因此会立即强制终止；任务管理器回退路径也无法确认完整清理。始终检查 `termination.treeCleaned` 和诊断信息，不要把终止请求当作完整树清理的保证。

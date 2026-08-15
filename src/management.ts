@@ -1,9 +1,9 @@
 import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
 import { createCommandRuntime, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
 import { parseManifestProbes } from "./manifest-probes.js";
-import { DEFAULT_ALIASES, resolveExecutable } from "./program-registry.js";
+import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
 
 export const EXIT = { unusable: 1, usage: 2 } as const;
 
@@ -47,7 +47,6 @@ export async function readManifest(path: string): Promise<unknown> {
 export async function validatedManifest(path: string): Promise<unknown> {
   const manifest = await readManifest(path);
   parseProgramManifest(manifest);
-  parseManifestProbes(manifest);
   return manifest;
 }
 
@@ -68,23 +67,37 @@ export function runtimeOptions(options: ManagementOptions, manifest: unknown): C
   };
 }
 
-export async function doctor(options: ManagementOptions, execute = false): Promise<{ ok: boolean; message: string }> {
+const inside = (root: string, candidate: string): boolean => { const child = relative(root, candidate); return child === "" || (!child.startsWith("..") && !isAbsolute(child)); };
+
+export async function doctor(options: ManagementOptions, execute = false, all = false): Promise<{ ok: boolean; message: string }> {
   if (!options.manifestPath) throw new Error("MANIFEST_REQUIRED");
-  const manifest = await validatedManifest(options.manifestPath);
+  const rawManifest = await validatedManifest(options.manifestPath);
   if (!options.roots.length) throw new Error("ROOT_REQUIRED");
   for (const root of options.roots) { try { if (!(await stat(root)).isDirectory()) throw new Error(); } catch { throw new Error(`ROOT_NOT_DIRECTORY: ${root}`); } }
-  const runtime = await createCommandRuntime(runtimeOptions(options, manifest));
+  const manifest = parseProgramManifest(rawManifest);
+  const declaredProbes = parseManifestProbes(rawManifest);
+  if (options.roots.length > 1) for (const [name, probe] of Object.entries(declaredProbes)) {
+    if (!probe.cwd) throw new Error(`INVALID_MANIFEST: manifest.probes.${name}.cwd is required for multiple roots`);
+    if (!options.roots.some(root => inside(resolve(root), probe.cwd!))) throw new Error(`PROBE_CWD_NOT_ALLOWED: ${name}`);
+  }
+  const runtime = await createCommandRuntime(runtimeOptions(options, rawManifest));
   try {
     const environment = await runtime.inspectEnvironment();
     const winners = Object.values(environment.programs).map(program => `${program.logicalName}=${program.declaredCandidate} -> ${program.executable}`).join(", ");
-    if (!execute) return { ok: true, message: `static configuration is valid (no programs executed; winners: ${winners || "none"})` };
-    const probes = parseManifestProbes(manifest);
-    for (const [name, probe] of Object.entries(probes)) {
+    const path = [...(manifest.searchPath ?? []), ...(manifest.allowInheritedPath ? [process.env.PATH ?? ""] : [])].filter(Boolean).join(process.platform === "win32" ? ";" : delimiter);
+    const shadows = (await Promise.all(Object.entries(manifest.programs).map(async ([name, program]) => {
+      const matches = await resolveExecutableMatches(program.candidates, { path, pathExt: manifest.pathExt, manifestDirectory: options.manifestPath && dirname(resolve(options.manifestPath)) });
+      return matches.length > 1 ? `${name}: winner ${matches[0]}; shadowed ${matches.slice(1).join(", ")}` : undefined;
+    }))).filter((value): value is string => value !== undefined);
+    const diagnostic = `${winners || "none"}${shadows.length ? `; shadows: ${shadows.join(" | ")}` : ""}`;
+    if (!execute) return { ok: true, message: `static configuration is valid (no programs executed; winners: ${diagnostic})` };
+    const probes = Object.entries(declaredProbes).filter(([name]) => all || manifest.programs[name]?.required);
+    for (const [name, probe] of probes) {
       if (!environment.programs[name]) throw new Error(`PROBE_PROGRAM_UNAVAILABLE: ${name}`);
-      const result = await runtime.execute({ program: name, args: probe.args });
+      const result = await runtime.execute({ program: name, args: probe.args, cwd: probe.cwd });
       if (!(probe.acceptedExitCodes ?? [0]).includes(result.exitCode ?? -1)) throw new Error(`PROBE_FAILED: ${name}`);
     }
-    return { ok: true, message: `executed ${Object.keys(probes).length} declared probe(s); winners: ${winners || "none"}` };
+    return { ok: true, message: `executed ${probes.length} declared probe(s)${all ? " including optional programs" : " for required programs"}; winners: ${diagnostic}` };
   } finally { await runtime.close(); }
 }
 

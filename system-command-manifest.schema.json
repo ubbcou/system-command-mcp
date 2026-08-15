@@ -23,7 +23,7 @@
     "program": { "allOf": [{ "$ref": "#/$defs/programFields" }, { "required": ["candidates"] }] },
     "partialProgram": { "$ref": "#/$defs/programFields" },
     "platform": { "type": "object", "additionalProperties": false, "properties": { "searchPath": { "$ref": "#/$defs/strings" }, "pathExt": { "type": "string" }, "allowInheritedPath": { "type": "boolean" }, "environment": { "$ref": "#/$defs/environment" }, "programs": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/partialProgram" } } } },
-    "probe": { "type": "object", "additionalProperties": false, "properties": { "args": { "$ref": "#/$defs/strings" }, "acceptedExitCodes": { "type": "array", "items": { "type": "integer" } } } }
+    "probe": { "type": "object", "additionalProperties": false, "properties": { "args": { "$ref": "#/$defs/strings" }, "acceptedExitCodes": { "type": "array", "items": { "type": "integer" } }, "cwd": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|/)" } } }
   },
   "$comment": "Runtime additionally rejects required programs disabled by base/platform merging and policies whose defaultTimeoutMs exceeds maxTimeoutMs."
 }
