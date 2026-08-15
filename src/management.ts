@@ -84,16 +84,14 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
     if (!probe.cwd) throw new Error(`INVALID_MANIFEST: manifest.probes.${name}.cwd is required for multiple roots`);
     if (!options.roots.some(root => inside(resolve(root), probe.cwd!))) throw new Error(`PROBE_CWD_NOT_ALLOWED: ${name}`);
   }
+  for (const [name, program] of Object.entries(manifest.programs)) {
+    if (program.enabled === false || program.policy?.maxTimeoutMs === undefined) continue;
+    const effectiveDefaultTimeoutMs = effectiveTimeoutMs(program.policy, options.defaultTimeoutMs);
+    if (effectiveDefaultTimeoutMs > program.policy.maxTimeoutMs) throw new Error(`INVALID_RUNTIME_CONFIG: Program ${name} effective defaultTimeoutMs ${effectiveDefaultTimeoutMs} exceeds maxTimeoutMs ${program.policy.maxTimeoutMs}`);
+  }
   const runtime = await createCommandRuntime(runtimeOptions(options, rawManifest));
   try {
     const environment = await runtime.inspectEnvironment();
-    for (const [name, program] of Object.entries(environment.programs)) {
-      const policy = manifest.programs[name]!.policy;
-      if (policy?.maxTimeoutMs !== undefined) {
-        const effectiveDefaultTimeoutMs = effectiveTimeoutMs(policy, options.defaultTimeoutMs);
-        if (effectiveDefaultTimeoutMs > policy.maxTimeoutMs) throw new Error(`INVALID_RUNTIME_CONFIG: Program ${program.logicalName} effective defaultTimeoutMs ${effectiveDefaultTimeoutMs} exceeds maxTimeoutMs ${policy.maxTimeoutMs}`);
-      }
-    }
     const winners = Object.values(environment.programs).map(program => `${program.logicalName}=${program.declaredCandidate} -> ${program.executable}`).join(", ");
     const shadows = (await Promise.all(Object.entries(manifest.programs).map(async ([name, program]) => {
       if (program.enabled === false) return undefined;
@@ -108,13 +106,14 @@ export async function doctor(options: ManagementOptions, execute = false, all = 
       .map(([name, program]) => `optional-unavailable: ${name} (candidates: ${program.candidates.join(", ")})`);
     const diagnostic = `${winners || "none"}${shadows.length ? `; shadows: ${shadows.join(" | ")}` : ""}${optionalWarnings.length ? `; warnings: ${optionalWarnings.join(" | ")}` : ""}`;
     if (!execute) return { ok: true, message: `static configuration is valid (no programs executed; winners: ${diagnostic})` };
-    const probes = Object.entries(declaredProbes).filter(([name]) => all || manifest.programs[name]?.required);
+    const disabledProbes = Object.keys(declaredProbes).filter(name => manifest.programs[name]?.enabled === false);
+    const probes = Object.entries(declaredProbes).filter(([name]) => manifest.programs[name]?.enabled !== false && (all || manifest.programs[name]?.required));
     for (const [name, probe] of probes) {
       if (!environment.programs[name]) throw new Error(`PROBE_PROGRAM_UNAVAILABLE: ${name}`);
       const result = await runtime.execute({ program: name, args: probe.args, cwd: probe.cwd });
       if (!(probe.acceptedExitCodes ?? [0]).includes(result.exitCode ?? -1)) throw new Error(`PROBE_FAILED: ${name}`);
     }
-    return { ok: true, message: `executed ${probes.length} declared probe(s)${all ? " including optional programs" : " for required programs"}; winners: ${diagnostic}` };
+    return { ok: true, message: `executed ${probes.length} declared probe(s)${all ? " including optional programs" : " for required programs"}${disabledProbes.length ? `; skipped disabled probes: ${disabledProbes.join(", ")}` : ""}; winners: ${diagnostic}` };
   } finally { await runtime.close(); }
 }
 

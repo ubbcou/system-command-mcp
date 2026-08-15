@@ -54,15 +54,15 @@ test("init selection makes --yes optional and supports deterministic core select
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("doctor executes required probes by default and optional probes only with --all", async () => {
+test("doctor executes enabled required probes by default, enabled optional probes with --all, and skips disabled probes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "system-command-cli-")); const path = join(directory, "manifest.json");
   try {
-    await writeFile(path, manifest({ node: { candidates: ["node"], required: true }, optional: { candidates: ["node"], required: false } }, {
-      node: { args: ["-e", "process.exit(0)"] }, optional: { args: ["-e", "process.exit(9)"], acceptedExitCodes: [9] },
+    await writeFile(path, manifest({ node: { candidates: ["node"], required: true }, optional: { candidates: ["node"], required: false }, disabled: { candidates: ["node"], enabled: false } }, {
+      node: { args: ["-e", "process.exit(0)"] }, optional: { args: ["-e", "process.exit(9)"], acceptedExitCodes: [9] }, disabled: { args: ["-e", "process.exit(1)"] },
     }));
     assert.match(run(["doctor", "--manifest", path, "--root", directory]).stderr, /no programs executed/);
-    const required = run(["doctor", "--execute", "--manifest", path, "--root", directory]); assert.equal(required.status, 0); assert.match(required.stderr, /executed 1 declared probe.*required/);
-    const all = run(["doctor", "--execute", "--all", "--manifest", path, "--root", directory]); assert.equal(all.status, 0); assert.match(all.stderr, /executed 2 declared probe.*including optional/);
+    const required = run(["doctor", "--execute", "--manifest", path, "--root", directory]); assert.equal(required.status, 0); assert.match(required.stderr, /executed 1 declared probe.*required.*skipped disabled probes: disabled/);
+    const all = run(["doctor", "--execute", "--all", "--manifest", path, "--root", directory]); assert.equal(all.status, 0); assert.match(all.stderr, /executed 2 declared probe.*including optional.*skipped disabled probes: disabled/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -97,13 +97,15 @@ test("doctor rejects invalid supplied runtime configuration with unusable exit",
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("doctor rejects a supplied effective default timeout above a registered Program maximum", async () => {
+test("doctor validates every enabled Program's effective default timeout without registration", async () => {
   const directory = await mkdtemp(join(tmpdir(), "system-command-cli-")); const path = join(directory, "manifest.json");
   try {
-    await writeFile(path, manifest({ node: { candidates: [process.execPath], required: true, policy: { maxTimeoutMs: 100 } } }));
-    const result = run(["doctor", "--manifest", path, "--root", directory, "--default-timeout-ms", "200"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /INVALID_RUNTIME_CONFIG: Program node effective defaultTimeoutMs 200 exceeds maxTimeoutMs 100/);
+    await writeFile(path, manifest({ node: { candidates: [process.execPath], required: true }, unavailable: { candidates: ["definitely-missing"], required: false, policy: { maxTimeoutMs: 100 } }, disabled: { candidates: ["definitely-missing"], enabled: false, policy: { maxTimeoutMs: 100 } } }));
+    const invalid = run(["doctor", "--manifest", path, "--root", directory, "--default-timeout-ms", "200"]);
+    assert.equal(invalid.status, 1);
+    assert.match(invalid.stderr, /INVALID_RUNTIME_CONFIG: Program unavailable effective defaultTimeoutMs 200 exceeds maxTimeoutMs 100/);
+    const skipped = run(["doctor", "--manifest", path, "--root", directory, "--default-timeout-ms", "100"]);
+    assert.equal(skipped.status, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
