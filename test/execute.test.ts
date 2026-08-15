@@ -32,6 +32,16 @@ test("executeProgram keeps bounded output head and tail", async () => {
   assert.equal(result.stdout.truncated, true);
 });
 
+test("executeProgram aligns truncated valid UTF-8 excerpts to codepoint boundaries", async () => {
+  const result = await executeProgram({
+    program: nodeProgram, args: ["-e", "process.stdout.write('a€b€c')"],
+    cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 6, inlineHeadBytes: 3,
+  });
+  assert.equal(result.stdout.text, "a\n[... 7 bytes omitted ...]\nc");
+  assert.equal(result.stdout.omittedBytes, 7);
+  assert.equal(result.stdout.lossyUtf8, false);
+});
+
 function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: EventEmitter & { end(input: string, encoding: string, callback: () => void): void }; killed: boolean; kill(): void } {
   const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: EventEmitter & { end(input: string, encoding: string, callback: () => void): void }; killed: boolean; kill(): void };
   child.stdout = new EventEmitter();

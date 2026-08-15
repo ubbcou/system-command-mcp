@@ -170,10 +170,10 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isInside(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
       const childEnvironment = { ...environment }; applyLayer(childEnvironment, input, definitions[request.program]?.environment, platform);
-      const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined;
-      if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spool = undefined; }
+      const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
+      if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
       const result = await executeProgram({ program: definition, args, cwd, timeoutMs, gracePeriodMs: policy.gracePeriodMs ?? options.gracePeriodMs ?? 2_000, finalTerminationWaitMs: policy.finalTerminationWaitMs ?? options.finalTerminationWaitMs ?? 5_000, signal: controller.signal, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024, inlineHeadBytes: options.inlineHeadBytes, input: request.input, environment: childEnvironment, onOutput: spool ? (stream, chunk) => spool!.append(stream, chunk) : undefined });
-      const wantedArtifact = artifactPolicy === "always" || (artifactPolicy === "on-truncation" && (result.stdout.truncated || result.stderr.truncated)); let artifact: ArtifactStatus = artifactPolicy === "never" ? { status: "not-requested" } : { status: "discarded" };
+      const wantedArtifact = artifactPolicy === "always" || (artifactPolicy === "on-truncation" && (result.stdout.truncated || result.stderr.truncated)); let artifact: ArtifactStatus = artifactPolicy === "never" ? { status: "not-requested" } : spoolAttemptFailed ? { status: "unavailable" } : { status: "discarded" };
       if (wantedArtifact) { if (!spool || spool.failed) artifact = { status: "unavailable" }; else try { artifact = { status: "published", id: await artifacts.publish(spool) }; spool = undefined; } catch { artifact = { status: "unavailable" }; } }
       await artifacts.discard(spool); return { ...result, artifact };
     })();

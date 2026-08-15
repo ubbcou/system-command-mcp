@@ -18,30 +18,38 @@ type Owner = { runtimeId: string; token: string; leaseUntil: number };
 export class ArtifactStore {
   private readonly runtimeId = randomBytes(16).toString("hex");
   private readonly spools = new Set<ArtifactSpool>();
+  private readonly spoolCreations = new Set<Promise<ArtifactSpool>>();
   private heartbeat: NodeJS.Timeout | undefined;
   private closeCleanup: Promise<void> | undefined;
   private closed = false;
   private unavailable = false;
-  constructor(private readonly directory: string, private readonly retentionMs: number, private readonly quotaBytes: number, private readonly maxStreamBytes = 100 * 1024 * 1024) {}
+  constructor(private readonly directory: string, private readonly retentionMs: number, private readonly quotaBytes: number, private readonly maxStreamBytes = 100 * 1024 * 1024, private readonly spoolStage?: (stage: "mkdir") => Promise<void>) {}
   async start(): Promise<void> {
     try {
-      await mkdir(this.directory, { recursive: true, mode: 0o700 });
-      await this.withLock(async () => { await this.recover(); await this.cleanup(); });
-      this.heartbeat = setInterval(() => { void this.touchSpools(); }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3)));
+      await mkdir(this.directory, { recursive: true, mode: 0o700 }); if (this.closed) return;
+      await this.withLock(async () => { await this.recover(); if (this.closed) return; await this.cleanup(); }); if (this.closed) return;
+      this.heartbeat = setInterval(() => { void this.touchSpools(); }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3))); if (this.closed) { clearInterval(this.heartbeat); this.heartbeat = undefined; return; }
       this.heartbeat.unref();
     } catch { this.unavailable = true; }
   }
   async spool(): Promise<ArtifactSpool> {
-    if (this.closed || this.unavailable) throw new Error("ARTIFACT_UNAVAILABLE");
-    const path = join(this.directory, `.spool-${this.runtimeId}-${randomBytes(16).toString("hex")}`);
-    const staging = `${path}.new`;
-    const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
-    await mkdir(staging, { mode: 0o700 });
-    try { await this.writeOwner(staging, owner); await writeFile(join(staging, "stdout"), "", { mode: 0o600 }); await writeFile(join(staging, "stderr"), "", { mode: 0o600 }); await rename(staging, path); }
-    catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
-    const spool = new ArtifactSpool(path, this.maxStreamBytes, owner, () => this.spools.delete(spool));
-    this.spools.add(spool);
-    return spool;
+    let creation!: Promise<ArtifactSpool>;
+    creation = (async () => {
+      if (this.closed || this.unavailable) throw new Error("ARTIFACT_UNAVAILABLE");
+      const path = join(this.directory, `.spool-${this.runtimeId}-${randomBytes(16).toString("hex")}`);
+      const staging = `${path}.new`;
+      const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
+      await mkdir(staging, { mode: 0o700 }); if (this.closed) { await rm(staging, { recursive: true, force: true }); throw new Error("ARTIFACT_UNAVAILABLE"); } await this.spoolStage?.("mkdir");
+      try { if (this.closed) throw new Error("ARTIFACT_UNAVAILABLE"); await this.writeOwner(staging, owner); if (this.closed) throw new Error("ARTIFACT_UNAVAILABLE"); await writeFile(join(staging, "stdout"), "", { mode: 0o600 }); if (this.closed) throw new Error("ARTIFACT_UNAVAILABLE"); await writeFile(join(staging, "stderr"), "", { mode: 0o600 }); if (this.closed) throw new Error("ARTIFACT_UNAVAILABLE"); await rename(staging, path); }
+      catch (error) { await rm(staging, { recursive: true, force: true }); await rm(path, { recursive: true, force: true }); throw error; }
+      const spool = new ArtifactSpool(path, this.maxStreamBytes, owner, () => this.spools.delete(spool));
+      if (this.closed) { await spool.remove(); throw new Error("ARTIFACT_UNAVAILABLE"); }
+      this.spools.add(spool);
+      if (this.closed) { await spool.remove(); throw new Error("ARTIFACT_UNAVAILABLE"); }
+      return spool;
+    })();
+    this.spoolCreations.add(creation);
+    try { return await creation; } finally { this.spoolCreations.delete(creation); }
   }
   async publish(spool: ArtifactSpool): Promise<string> {
     if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
@@ -73,7 +81,7 @@ export class ArtifactStore {
     this.closed = true;
     if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
     if (this.closeCleanup) { await this.closeCleanup; return; }
-    const cleanup = this.closeCleanup = Promise.all([...this.spools].map(spool => spool.remove())).then(() => {}, () => {});
+    const cleanup = this.closeCleanup = Promise.allSettled([...this.spoolCreations]).then(() => Promise.all([...this.spools].map(spool => spool.remove()))).then(() => {}, () => {});
     let deadline: NodeJS.Timeout | undefined;
     const expires = new Promise<void>(resolve => { deadline = setTimeout(resolve, Math.max(0, deadlineMs)); deadline.unref(); });
     await Promise.race([cleanup, expires]);
