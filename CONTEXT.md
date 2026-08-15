@@ -9,8 +9,20 @@ A stable, platform-independent program identity exposed to agents, such as `git`
 _Avoid_: Command, tool, binary
 
 **Registered Program**:
-A Logical Program that resolved to an executable in the Server's startup environment and is available for execution.
+A Logical Program with a static fallback executable resolved from its Declared Candidate at startup and available for execution. It can also expose an immutable Program Variant Set without changing the fallback registration.
 _Avoid_: Installed command, detected tool
+
+**Program Variant**:
+A concrete executable and version eligible for dynamic selection by a Registered Program.
+_Avoid_: Active Node version, manager selection
+
+**Program Variant Set**:
+The immutable startup snapshot of Program Variants available for one Registered Program.
+_Avoid_: Live installation scan, active version
+
+**Program Selection**:
+The static fallback or Program Variant actually selected for one Execution Request. A dynamic selection uses only a declaration read from that request's authorized Working Directory Root.
+_Avoid_: Registered Program, global version switch
 
 **Execution Request**:
 A request to invoke one Registered Program with literal arguments, an allowed working directory, and a finite timeout.
@@ -33,7 +45,7 @@ A Logical Program exposed only when it can be registered on the current machine.
 _Avoid_: Best-effort command
 
 **Execution Environment**:
-The authoritative startup snapshot used both to register programs and to run them, so discovery and child-process behavior do not depend on differences between host launch environments.
+The authoritative startup snapshot used to register static fallbacks and Program Variant Sets and to run child processes, so discovery and child-process behavior do not depend on differences between host launch environments. Per-request project declarations may select only from an already snapshotted Program Variant Set.
 _Avoid_: Shell environment, inherited environment
 
 **Program Manifest**:
@@ -169,7 +181,7 @@ A global or Program-specific set of variable removals and assignments applied in
 _Avoid_: Environment map, shell environment
 
 **Declared Candidate**:
-The Program Candidate text recorded in the Program Manifest before home, relative-path, PATH, or symbolic-link resolution.
+The Program Candidate text recorded in the Program Manifest before home, relative-path, PATH, or symbolic-link resolution. It applies only to the Registered Program's static fallback, never to a dynamically selected Program Variant.
 _Avoid_: Executable path, resolved program
 
 **Command Runtime**:
@@ -195,3 +207,7 @@ _Avoid_: Startup check, health command
 **Root Identity**:
 The platform-specific identity of an authorized Working Directory Root captured at startup, when available, to detect replacement of the directory object at the same path.
 _Avoid_: Root path, real path
+
+**Node Project Resolver**:
+The optional Program Variant Set for `node` and per-Execution Request project-declaration selection that preserves `node` as one Logical Program while selecting an executable without changing global state.
+_Avoid_: Node switcher, active Node version

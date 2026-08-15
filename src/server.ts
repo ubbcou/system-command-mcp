@@ -11,7 +11,7 @@ export interface ServerOptions extends Omit<CommandRuntimeOptions, "roots"> {
 function environmentValue(snapshot: RuntimeEnvironment): Record<string, unknown> {
   return {
     platform: snapshot.platform, arch: snapshot.arch, cwd: snapshot.cwd, mode: snapshot.mode, roots: snapshot.roots,
-    programs: Object.fromEntries(Object.entries(snapshot.programs).map(([name, program]) => [name, { executable: program.executable, declaredCandidate: program.declaredCandidate, kind: program.kind, argumentSemantics: program.argumentSemantics }])),
+    programs: Object.fromEntries(Object.entries(snapshot.programs).map(([name, program]) => [name, { executable: program.executable, declaredCandidate: program.declaredCandidate, kind: program.kind, argumentSemantics: program.argumentSemantics, ...(program.variantSet ? { variantSet: program.variantSet } : {}) }])),
   };
 }
 

@@ -37,11 +37,13 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cross-spawn": "^7.0.6",
     "koffi": "^2.16.3",
+    "semver": "^7.8.5",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.15.3",
+    "@types/semver": "^7.7.1",
     "typescript": "^5.8.3"
   }
 }

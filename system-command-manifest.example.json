@@ -1,6 +1,7 @@
 {
   "version": 1,
   "allowInheritedPath": true,
+  "nodeResolution": { "enabled": true },
   "programs": {
     "git": { "candidates": ["git"], "required": true },
     "node": { "candidates": ["node"], "required": false, "policy": { "maxTimeoutMs": 60000 } }
