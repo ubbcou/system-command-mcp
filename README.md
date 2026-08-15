@@ -36,11 +36,11 @@
 
 **Windows 一句话：**
 
-> 请读取并严格执行 https://raw.githubusercontent.com/ubbcou/system-command-mcp/main/docs/install/windows-agent.md 。自主完成环境识别、版本化 Managed Installation、Manifest 生成、Codex/DSH 配置备份与切换，以及真实验收；除非遇到缺少凭据、软件或权限等外部阻塞，否则不要让我手动操作。不要执行 npm publish 或创建 GitHub Release。
+> 请读取并严格执行 https://raw.githubusercontent.com/ubbcou/system-command-mcp/main/docs/install/windows-agent.md 。自主完成环境识别、不可变 `<version>-<shortSHA>` Managed Installation、临时 Manifest 验证及受控提升、Codex/DSH 配置备份与切换，以及真实验收和失败回滚；除非遇到缺少凭据、软件或权限等外部阻塞，否则不要让我手动操作。不要执行 npm publish 或创建 GitHub Release。
 
 **macOS 一句话：**
 
-> 请读取并严格执行 https://raw.githubusercontent.com/ubbcou/system-command-mcp/main/docs/install/macos-agent.md 。自主完成环境识别、macOS arm64 本机构建、版本化 Managed Installation、Manifest 生成、Codex/DSH 配置备份与切换，以及真实验收；除非遇到缺少凭据、软件或权限等外部阻塞，否则不要让我手动操作。不要复制其他系统的 node_modules，不要执行 npm publish 或创建 GitHub Release。
+> 请读取并严格执行 https://raw.githubusercontent.com/ubbcou/system-command-mcp/main/docs/install/macos-agent.md 。自主完成环境识别、macOS arm64 本机构建、不可变 `<version>-<shortSHA>` Managed Installation、临时 Manifest 验证及受控提升、Codex/DSH 配置备份与切换，以及真实验收和失败回滚；除非遇到缺少凭据、软件或权限等外部阻塞，否则不要让我手动操作。不要复制其他系统的 node_modules，不要执行 npm publish 或创建 GitHub Release。
 
 ## 构建和测试
 
