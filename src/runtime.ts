@@ -64,7 +64,7 @@ function mergeProgram(base: ManifestProgram, override?: Partial<ManifestProgram>
 function validatePolicy(value: ProgramPolicy | undefined, path: string): void { if (value?.defaultTimeoutMs !== undefined && value.maxTimeoutMs !== undefined && value.defaultTimeoutMs > value.maxTimeoutMs) throw new Error(`INVALID_MANIFEST: ${path}.defaultTimeoutMs exceeds ${path}.maxTimeoutMs`); }
 
 export function parseProgramManifest(value: unknown, platform: NodeJS.Platform = process.platform): ProgramManifest {
-  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "programs", "platforms"], "manifest");
+  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "programs", "platforms", "probes"], "manifest");
   if (root.version !== 1) throw new Error("INVALID_MANIFEST: version must be 1");
   if (!root.programs) throw new Error("INVALID_MANIFEST: programs is required");
   if (root.searchPath !== undefined && (!Array.isArray(root.searchPath) || !root.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");

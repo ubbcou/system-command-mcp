@@ -36,19 +36,21 @@ npm test
 ## 管理 CLI 与 MCP 配置
 
 ```bash
-# 生成不可覆盖的确定性 Manifest；不会修改 Codex 或 DSH 配置
-system-command-mcp init --manifest system-command-manifest.json
-# 显式启动；旧的 `--root PATH` 调用在 1.0 前仍兼容，但会发出 stderr 弃用提示
+# 发现固定的非 Shell 常用程序集；--yes 使用全部可用程序作为 Optional，且不会修改 Codex 或 DSH 配置
+system-command-mcp init --yes --manifest system-command-manifest.json
+# 已有 Manifest 默认拒绝覆盖；仅 --force 可以替换
+system-command-mcp init --yes --force --manifest system-command-manifest.json
+# 配置模式必须显式提供至少一个 Root；旧的 `--root PATH` 调用在 1.0 前仍兼容，但会发出 stderr 弃用提示
 system-command-mcp serve --manifest system-command-manifest.json --root /absolute/path/to/workspace
-# 默认只做静态 JSON/Manifest/Root 检查，不会执行程序；--probe 才会解析程序
+# 默认构造并关闭配置 Runtime 以静态验证候选项、环境引用和限制，不执行程序；--execute 仅执行 Manifest 明确声明的 probes
 system-command-mcp doctor --manifest system-command-manifest.json --root /absolute/path/to/workspace
-system-command-mcp doctor --probe --manifest system-command-manifest.json --root /absolute/path/to/workspace
+system-command-mcp doctor --execute --manifest system-command-manifest.json --root /absolute/path/to/workspace
 # 仅把对应的配置片段写到 stdout，注意审阅后手动添加
 system-command-mcp print-config codex --manifest system-command-manifest.json --root /absolute/path/to/workspace
 system-command-mcp print-config dsh --manifest system-command-manifest.json --root /absolute/path/to/workspace
 ```
 
-Manifest Schema 和示例分别为 `system-command-manifest.schema.json`、`system-command-manifest.example.json`。Codex 输出会识别 `CODEX_HOME`（默认 `~/.codex`），并包含 `command`、`args`、`cwd`、`startup_timeout_sec` 和 `tool_timeout_sec`。DSH 输出包含 `toolCallTimeoutMs`、`failOnStartupError` 和 `reconnect`。
+Manifest Schema 和示例分别为 `system-command-manifest.schema.json`、`system-command-manifest.example.json`。`probes` 仅供 `doctor --execute` 使用，启动 MCP 不会执行它们。Codex 输出说明 `$CODEX_HOME/config.toml` 和实际有效的 `CODEX_HOME`（默认 `~/.codex`）；v0.1.0 有意设置启动超时 30 秒、工具超时 300 秒，并给出 `codex mcp list --json` / `codex mcp get system-command --json` 验证命令。DSH 输出是 rc.6 的 Cordis `@deepseek-ai/dsh-mcp-client` 插件列表行，包含 `serverName`、`transport`、`command`、`args`、`cwd`、30,000 ms `toolCallTimeoutMs`、启动失败致命和有界 reconnect（500/30000/10）。
 
 ## Host Guidance
 
