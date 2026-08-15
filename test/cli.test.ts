@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile, chmod } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -116,8 +116,8 @@ test("doctor shadows use the program's effective environment layer", async () =>
     for (const directory of [first, second]) { const file = join(directory, filename); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o755); }
     await writeFile(path, JSON.stringify({ version: 1, environment: { set: { PATH: first } }, programs: { tool: { candidates: [filename], environment: { set: { PATH: `${second}${delimiter}${first}` } } } } }));
     const result = await doctor({ manifestPath: path, roots: [first] });
-    assert.ok(result.message.includes(`tool: winner ${join(second, filename)}`));
-    assert.ok(result.message.includes(`shadowed ${join(first, filename)}`));
+    assert.ok(result.message.includes(`tool: winner ${await realpath(join(second, filename))}`));
+    assert.ok(result.message.includes(`shadowed ${await realpath(join(first, filename))}`));
   } finally { await rm(first, { recursive: true, force: true }); await rm(second, { recursive: true, force: true }); }
 });
 
