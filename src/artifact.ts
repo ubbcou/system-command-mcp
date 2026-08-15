@@ -25,24 +25,19 @@ export class ArtifactStore {
   async start(): Promise<void> {
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
-      await this.withLock(async () => { await this.recover(); await this.cleanup(0); });
+      await this.withLock(async () => { await this.recover(); await this.cleanup(); });
       this.heartbeat = setInterval(() => { void this.touchSpools(); }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3)));
       this.heartbeat.unref();
     } catch { this.unavailable = true; }
   }
   async spool(): Promise<ArtifactSpool> {
     if (this.closed || this.unavailable) throw new Error("ARTIFACT_UNAVAILABLE");
-    const name = `.spool-${this.runtimeId}-${randomBytes(16).toString("hex")}`;
-    const path = join(this.directory, name);
+    const path = join(this.directory, `.spool-${this.runtimeId}-${randomBytes(16).toString("hex")}`);
     const staging = `${path}.new`;
     const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
     await mkdir(staging, { mode: 0o700 });
-    try {
-      await this.writeOwner(staging, owner);
-      await writeFile(join(staging, "stdout"), "", { mode: 0o600 });
-      await writeFile(join(staging, "stderr"), "", { mode: 0o600 });
-      await rename(staging, path);
-    } catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
+    try { await this.writeOwner(staging, owner); await writeFile(join(staging, "stdout"), "", { mode: 0o600 }); await writeFile(join(staging, "stderr"), "", { mode: 0o600 }); await rename(staging, path); }
+    catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
     const spool = new ArtifactSpool(path, this.maxStreamBytes, owner, () => this.spools.delete(spool));
     this.spools.add(spool);
     return spool;
@@ -51,46 +46,46 @@ export class ArtifactStore {
     if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
     await spool.finish();
     if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
-    const id = randomBytes(16).toString("hex");
-    const target = join(this.directory, id);
+    const id = randomBytes(16).toString("hex"); const target = join(this.directory, id);
     try {
       await this.withLock(async () => {
+        await spool.finish();
         if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
         const size = spool.stdoutBytes + spool.stderrBytes;
         if (size > this.quotaBytes) throw new Error("ARTIFACT_QUOTA");
         await this.cleanup(size);
         if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
         if (await this.publishedSize() + size > this.quotaBytes) throw new Error("ARTIFACT_QUOTA");
-        const meta: Metadata = { version: 1, state: "published", publishedAt: Date.now(), stdoutBytes: spool.stdoutBytes, stderrBytes: spool.stderrBytes };
-        await writeFile(join(spool.path, "meta.json"), JSON.stringify(meta), { mode: 0o600 });
+        await writeFile(join(spool.path, "meta.json"), JSON.stringify({ version: 1, state: "published", publishedAt: Date.now(), stdoutBytes: spool.stdoutBytes, stderrBytes: spool.stderrBytes } satisfies Metadata), { mode: 0o600 });
+        await spool.finish();
+        if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
         await rm(join(spool.path, "owner.json"), { force: true });
         if (this.closed || this.unavailable || spool.failed) throw new Error("ARTIFACT_UNAVAILABLE");
         await rename(spool.path, target);
-        if (this.closed || this.unavailable) { await rm(target, { recursive: true, force: true }); throw new Error("ARTIFACT_UNAVAILABLE"); }
         this.spools.delete(spool);
       });
       return id;
     } catch (error) { await spool.remove(); throw error; }
   }
   async discard(spool: ArtifactSpool | undefined): Promise<void> { await spool?.remove(); }
-  async close(): Promise<void> { this.closed = true; if (this.heartbeat) clearInterval(this.heartbeat); await Promise.all([...this.spools].map(spool => spool.remove())); }
+  async close(deadlineMs = LOCK_WAIT_MS): Promise<void> {
+    this.closed = true;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    const cleanup = Promise.all([...this.spools].map(spool => spool.remove())).then(() => {});
+    await Promise.race([cleanup, delay(Math.max(0, deadlineMs))]);
+  }
   async read(id: string, stream: OutputStream, offset: number, limit: number, encoding: OutputEncoding): Promise<OutputPage> {
     if (!validId.test(id)) throw new Error("ARTIFACT_NOT_FOUND");
     if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit <= 0 || limit > 1024 * 1024) throw new Error("INVALID_OUTPUT_PAGE");
-    const path = join(this.directory, id);
-    const meta = await this.validMeta(path);
-    const total = meta?.[stream === "stdout" ? "stdoutBytes" : "stderrBytes"];
-    if (total === undefined) throw new Error("ARTIFACT_NOT_FOUND");
+    const path = join(this.directory, id); const meta = await this.validMeta(path);
+    if (!meta || Date.now() - meta.publishedAt > this.retentionMs) { if (meta) await rm(path, { recursive: true, force: true }).catch(() => {}); throw new Error("ARTIFACT_NOT_FOUND"); }
+    const total = meta[stream === "stdout" ? "stdoutBytes" : "stderrBytes"];
     if (offset > total) throw new Error("INVALID_OUTPUT_OFFSET");
     const handle = await open(join(path, stream), "r").catch(() => undefined);
     if (!handle) throw new Error("ARTIFACT_NOT_FOUND");
     let page: Buffer;
-    try {
-      if ((await handle.stat()).size !== total) throw new Error();
-      page = Buffer.alloc(Math.min(limit, total - offset));
-      const { bytesRead } = await handle.read(page, 0, page.length, offset);
-      if (bytesRead !== page.length) throw new Error();
-    } catch { throw new Error("ARTIFACT_NOT_FOUND"); } finally { await handle.close().catch(() => {}); }
+    try { if ((await handle.stat()).size !== total) throw new Error(); page = Buffer.alloc(Math.min(limit, total - offset)); const { bytesRead } = await handle.read(page, 0, page.length, offset); if (bytesRead !== page.length) throw new Error(); }
+    catch { throw new Error("ARTIFACT_NOT_FOUND"); } finally { await handle.close().catch(() => {}); }
     const eof = offset + page.length === total;
     if (encoding === "base64") return { bytes: page.length, nextOffset: offset + page.length, eof, encoding, base64: page.toString("base64") };
     let text: string; let lossyUtf8 = false;
@@ -103,10 +98,11 @@ export class ArtifactStore {
       const owner: Owner = { runtimeId: this.runtimeId, token: randomBytes(16).toString("hex"), leaseUntil: Date.now() + LOCK_STALE_MS };
       try {
         await mkdir(path, { mode: 0o700 });
-        await this.writeOwner(path, owner);
-        const heartbeat = setInterval(() => { owner.leaseUntil = Date.now() + LOCK_STALE_MS; void this.writeOwner(path, owner); }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3)));
-        heartbeat.unref();
-        try { return await action(); } finally { clearInterval(heartbeat); await this.removeOwned(path, owner); }
+        await this.writeOwner(path, owner); // Claim immediately after atomic mkdir.
+        let chain = Promise.resolve();
+        const pulse = (): void => { owner.leaseUntil = Date.now() + LOCK_STALE_MS; chain = chain.then(() => this.writeOwner(path, owner)); };
+        const heartbeat = setInterval(pulse, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3))); heartbeat.unref();
+        try { return await action(); } finally { clearInterval(heartbeat); pulse(); await chain.catch(() => {}); await this.removeOwned(path, owner); }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         await this.removeStaleLock(path);
@@ -115,34 +111,27 @@ export class ArtifactStore {
       }
     }
   }
-  private async writeOwner(path: string, owner: Owner): Promise<void> {
-    const target = join(path, "owner.json"); const temporary = `${target}.${randomBytes(16).toString("hex")}.tmp`;
-    try { await writeFile(temporary, JSON.stringify(owner), { mode: 0o600 }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }); throw error; }
-  }
+  private async writeOwner(path: string, owner: Owner): Promise<void> { const target = join(path, "owner.json"); const temporary = `${target}.${randomBytes(16).toString("hex")}.tmp`; try { await writeFile(temporary, JSON.stringify(owner), { mode: 0o600 }); await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }); throw error; } }
   private validOwner(value: Partial<Owner>): value is Owner { return /^[a-f0-9]{32}$/.test(value.runtimeId ?? "") && /^[a-f0-9]{32}$/.test(value.token ?? "") && typeof value.leaseUntil === "number" && Number.isSafeInteger(value.leaseUntil); }
-  private async removeOwned(path: string, owner: Owner): Promise<void> {
-    try { const current = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (current.runtimeId === owner.runtimeId && current.token === owner.token && current.leaseUntil === owner.leaseUntil) await rm(path, { recursive: true, force: true }); } catch { /* ownership changed or lock already gone */ }
-  }
-  private async touchSpools(): Promise<void> { await Promise.all([...this.spools].map(async spool => { try { spool.owner.leaseUntil = Date.now() + LOCK_STALE_MS; await this.writeOwner(spool.path, spool.owner); } catch { spool.failed = true; } })); }
-  private async removeStaleLock(path: string): Promise<void> {
-    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (this.validOwner(owner) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner); } catch { /* malformed lock is not ours to remove */ }
-  }
-  private async removeStaleSpool(path: string): Promise<void> {
-    try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (this.validOwner(owner) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner); } catch { /* malformed owner is not enough to remove a spool */ }
-  }
-  private async recover(): Promise<void> {
-    for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && entry.name.startsWith(".spool-")) await this.removeStaleSpool(join(this.directory, entry.name));
-  }
+  private async removeOwned(path: string, owner: Owner): Promise<void> { try { const current = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (current.runtimeId === owner.runtimeId && current.token === owner.token && current.leaseUntil === owner.leaseUntil) await rm(path, { recursive: true, force: true }); } catch { /* ownership changed or absent */ } }
+  private async touchSpools(): Promise<void> { await Promise.all([...this.spools].map(spool => spool.heartbeat(path => this.writeOwner(path, spool.owner)))); }
+  private async old(path: string): Promise<boolean> { try { const first = await stat(path); if (Date.now() - first.mtimeMs < LOCK_STALE_MS) return false; const second = await stat(path); return second.mtimeMs === first.mtimeMs && Date.now() - second.mtimeMs >= LOCK_STALE_MS; } catch { return false; } }
+  private async removeStaleLock(path: string): Promise<void> { try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (this.validOwner(owner) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner); } catch { if (await this.old(path)) await rm(path, { recursive: true, force: true }).catch(() => {}); } }
+  private async removeStaleSpool(path: string): Promise<void> { try { const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as Partial<Owner>; if (this.validOwner(owner) && owner.leaseUntil < Date.now()) await this.removeOwned(path, owner); } catch { if (path.endsWith(".new") && await this.old(path)) await rm(path, { recursive: true, force: true }).catch(() => {}); } }
+  private async recover(): Promise<void> { for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && entry.name.startsWith(".spool-")) await this.removeStaleSpool(join(this.directory, entry.name)); }
   private async publishedSize(): Promise<number> { let total = 0; for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && validId.test(entry.name)) { const meta = await this.validMeta(join(this.directory, entry.name)); if (meta) total += meta.stdoutBytes + meta.stderrBytes; } return total; }
-  private async validMeta(path: string): Promise<Metadata | undefined> { try { const raw: unknown = JSON.parse(await readFile(join(path, "meta.json"), "utf8")); const meta = raw as Partial<Metadata>; const publishedAt = meta?.publishedAt; const stdoutBytes = meta?.stdoutBytes; const stderrBytes = meta?.stderrBytes; return meta?.version === 1 && meta.state === "published" && typeof publishedAt === "number" && Number.isSafeInteger(publishedAt) && publishedAt >= 0 && typeof stdoutBytes === "number" && Number.isSafeInteger(stdoutBytes) && stdoutBytes >= 0 && typeof stderrBytes === "number" && Number.isSafeInteger(stderrBytes) && stderrBytes >= 0 ? meta as Metadata : undefined; } catch { return undefined; } }
-  private async cleanup(reserve = 0): Promise<void> { const now = Date.now(); const published: { path: string; time: number; size: number }[] = []; for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && validId.test(entry.name)) { const path = join(this.directory, entry.name); const meta = await this.validMeta(path); if (!meta || now - meta.publishedAt > this.retentionMs) { await rm(path, { recursive: true, force: true }).catch(() => {}); continue; } const files = await Promise.all([stat(join(path, "stdout")), stat(join(path, "stderr"))].map(promise => promise.catch(() => undefined))); if (files[0]?.size !== meta.stdoutBytes || files[1]?.size !== meta.stderrBytes) { await rm(path, { recursive: true, force: true }).catch(() => {}); continue; } published.push({ path, time: meta.publishedAt, size: meta.stdoutBytes + meta.stderrBytes }); } let total = published.reduce((sum, item) => sum + item.size, 0); for (const item of published.sort((a, b) => a.time - b.time)) { if (total + reserve <= this.quotaBytes) break; await rm(item.path, { recursive: true, force: true }).catch(() => {}); total -= item.size; } }
+  private async validMeta(path: string): Promise<Metadata | undefined> { try { const meta = JSON.parse(await readFile(join(path, "meta.json"), "utf8")) as Partial<Metadata>; return meta.version === 1 && meta.state === "published" && Number.isSafeInteger(meta.publishedAt) && meta.publishedAt! >= 0 && Number.isSafeInteger(meta.stdoutBytes) && meta.stdoutBytes! >= 0 && Number.isSafeInteger(meta.stderrBytes) && meta.stderrBytes! >= 0 ? meta as Metadata : undefined; } catch { return undefined; } }
+  private async cleanup(reserve = 0): Promise<void> { const now = Date.now(); const published: { path: string; time: number; size: number }[] = []; for (const entry of await readdir(this.directory, { withFileTypes: true })) if (entry.isDirectory() && validId.test(entry.name)) { const path = join(this.directory, entry.name); const meta = await this.validMeta(path); if (!meta || now - meta.publishedAt > this.retentionMs) { await rm(path, { recursive: true, force: true }).catch(() => {}); continue; } const files = await Promise.all([stat(join(path, "stdout")).catch(() => undefined), stat(join(path, "stderr")).catch(() => undefined)]); if (files[0]?.size !== meta.stdoutBytes || files[1]?.size !== meta.stderrBytes) { await rm(path, { recursive: true, force: true }).catch(() => {}); continue; } published.push({ path, time: meta.publishedAt, size: meta.stdoutBytes + meta.stderrBytes }); } let total = published.reduce((sum, item) => sum + item.size, 0); for (const item of published.sort((a, b) => a.time - b.time)) { if (total + reserve <= this.quotaBytes) break; await rm(item.path, { recursive: true, force: true }).catch(() => {}); total -= item.size; } }
 }
 
 export class ArtifactSpool {
   failed = false; stdoutBytes = 0; stderrBytes = 0;
-  private chains: Record<OutputStream, Promise<void>> = { stdout: Promise.resolve(), stderr: Promise.resolve() };
+  private readonly chains: Record<OutputStream, Promise<void>> = { stdout: Promise.resolve(), stderr: Promise.resolve() };
+  private heartbeatChain = Promise.resolve();
+  private removedYet = false;
   constructor(readonly path: string, private readonly maxStreamBytes: number, readonly owner: Owner, private readonly removed: () => void) {}
-  async append(stream: OutputStream, chunk: Buffer): Promise<void> { const chain = this.chains[stream] = this.chains[stream].then(async () => { if (this.failed) return; const bytes = stream === "stdout" ? this.stdoutBytes : this.stderrBytes; if (bytes + chunk.length > this.maxStreamBytes) { this.failed = true; return; } try { await appendFile(join(this.path, stream), chunk); if (stream === "stdout") this.stdoutBytes += chunk.length; else this.stderrBytes += chunk.length; } catch { this.failed = true; } }); return chain; }
-  async finish(): Promise<void> { await Promise.all(Object.values(this.chains)); }
-  async remove(): Promise<void> { await this.finish(); await rm(this.path, { recursive: true, force: true }).catch(() => {}); this.removed(); }
+  append(stream: OutputStream, chunk: Buffer): Promise<void> { const work = async (): Promise<void> => { if (this.failed || this.removedYet) throw new Error("ARTIFACT_UNAVAILABLE"); const bytes = stream === "stdout" ? this.stdoutBytes : this.stderrBytes; if (bytes + chunk.length > this.maxStreamBytes) { this.failed = true; throw new Error("ARTIFACT_STREAM_CAP"); } try { await appendFile(join(this.path, stream), chunk); if (stream === "stdout") this.stdoutBytes += chunk.length; else this.stderrBytes += chunk.length; } catch (error) { this.failed = true; throw error; } }; const next = this.chains[stream].then(work, work); this.chains[stream] = next.catch(() => {}); return next; }
+  heartbeat(write: (path: string) => Promise<void>): Promise<void> { if (this.removedYet || this.failed) return this.heartbeatChain; this.owner.leaseUntil = Date.now() + LOCK_STALE_MS; this.heartbeatChain = this.heartbeatChain.then(() => write(this.path)).catch(() => { this.failed = true; }); return this.heartbeatChain; }
+  async finish(): Promise<void> { await Promise.all([...Object.values(this.chains), this.heartbeatChain]); }
+  async remove(): Promise<void> { this.removedYet = true; await this.finish(); await rm(this.path, { recursive: true, force: true }).catch(() => {}); this.removed(); }
 }
