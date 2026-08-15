@@ -9,7 +9,7 @@ import type { ProgramSelection, RegisteredProgram } from "./types.js";
 const PACKAGE_LIMIT = 1024 * 1024;
 const VERSION_FILE_LIMIT = 4096;
 export interface NodeResolution { enabled: boolean; installationRoots?: string[]; }
-export interface ProjectNodeResolution { enabledRoots: string[]; installationRoots: string[]; defaultVersion?: string; }
+export interface ProjectNodeResolution { enabledRoots: string[]; installationRoots: string[]; defaultVersion: string; }
 type NodeIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint };
 export interface NodeVariant { version: string; versionDirectory: string; versionDirectoryIdentity: NodeIdentity; executable: string; executableIdentity: NodeIdentity; npmCli?: string; npmCliIdentity?: NodeIdentity; npxCli?: string; npxCliIdentity?: NodeIdentity; }
 export interface NodeSelection { program: RegisteredProgram; selection?: ProgramSelection; variant?: NodeVariant; }
@@ -38,8 +38,8 @@ export function parseProjectNodeResolution(value: unknown, path: string): Projec
     return [...entries];
   };
   const defaultVersion = item.defaultVersion;
-  if (defaultVersion !== undefined && (typeof defaultVersion !== 'string' || !version(defaultVersion))) throw new Error(`INVALID_MANIFEST: ${path}.defaultVersion`);
-  return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: defaultVersion === undefined ? undefined : version(defaultVersion)! };
+  if (typeof defaultVersion !== 'string' || !version(defaultVersion)) throw new Error(`INVALID_MANIFEST: ${path}.defaultVersion`);
+  return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: version(defaultVersion)! };
 }
 
 function roots(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
@@ -184,7 +184,7 @@ async function declaration(directory: string): Promise<Declaration | undefined> 
   return pkg === undefined ? undefined : packageRequirement(pkg);
 }
 
-export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, defaultVersion?: string): Promise<NodeSelection> {
+export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, defaultVersion: string): Promise<NodeSelection> {
   let directory = cwd;
   const ranges: Declaration[] = [];
   let nearestExact: Declaration[] | undefined;
@@ -208,7 +208,8 @@ export async function resolveProjectNodeV2(cwd: string, root: string, variants: 
   }
   if (nearestExact) {
     const normalized = nearestExact.map(found => ({ ...found, requirement: version(found.requirement) }));
-    if (normalized.some(found => !found.requirement) || new Set(normalized.map(found => found.requirement)).size !== 1) throw new Error('PROJECT_NODE_DECLARATION_CONFLICT');
+    if (normalized.some(found => !found.requirement)) throw new Error(`NODE_VERSION_REQUIREMENT_INVALID: ${nearestExact[0]!.source}`);
+    if (new Set(normalized.map(found => found.requirement)).size !== 1) throw new Error('PROJECT_NODE_DECLARATION_CONFLICT');
     const found = normalized[0]!; const selected = variants.find(item => item.version === found.requirement);
     if (!selected) throw new Error(`PROJECT_NODE_VERSION_UNAVAILABLE: ${found.source}`);
     if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');

@@ -82,6 +82,7 @@ test("node resolver excludes prereleases from composite stable ranges", async ()
 test("node resolver parses strict manifest fields", () => {
   assert.throws(() => parseProgramManifest({ version: 1, nodeResolution: { enabled: true, unexpected: true }, programs: {} }), /unknown field/);
   assert.throws(() => parseProgramManifest({ version: 1, nodeResolution: { installationRoots: ["relative"] }, programs: {} }), /installationRoots/);
+  assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"] }, programs: {} }), /defaultVersion/);
   for (const value of ["22", "^22", ">=22"]) assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: value }, programs: {} }), /defaultVersion/);
   assert.throws(() => parseProgramManifest({ version: 2, nodeResolution: { enabled: true }, programs: {} }), /nodeResolution/);
 });
@@ -100,13 +101,13 @@ test("v2 selects exact nearest declaration, checks ancestor engines, and default
 test("v2 conflicts fail closed and keeps outside enabled roots static", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-conflict-")); await node(root, "v22.2.0"); const project = join(root, "project"); const outside = join(root, "outside"); await mkdir(project); await mkdir(outside); await writeFile(join(project, ".nvmrc"), "22.2.0"); await writeFile(join(project, ".node-version"), "20.1.0");
   const instance = await runtimeV2(root, project, "v22.2.0");
-  try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_DECLARATION_CONFLICT/); const result = await instance.execute({ program: "node", cwd: outside }); assert.equal(result.programSelection?.version, undefined); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+  try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_DECLARATION_CONFLICT/); await rm(join(project, ".node-version")); await writeFile(join(project, ".nvmrc"), "22"); await assert.rejects(instance.execute({ program: "node", cwd: project }), /NODE_VERSION_REQUIREMENT_INVALID: \.nvmrc/); const result = await instance.execute({ program: "node", cwd: outside }); assert.equal(result.programSelection?.version, undefined); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("v2 authorizes roots and supports platform override", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-root-")); await node(root, "v22.2.0");
   try {
     await assert.rejects(createCommandRuntime({ roots: [root], manifest: manifestV2(root, join(root, "missing"), "v22.2.0") }), /PROJECT_NODE_ROOT_UNAVAILABLE/);
-    const parsed = parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/base"], installationRoots: ["/nodes"] }, programs: {}, platforms: { [process.platform]: { projectNode: { enabledRoots: ["/override"], installationRoots: ["/nodes"], defaultVersion: "v22.2.0" } } } }); assert.deepEqual(parsed.projectNode?.enabledRoots, ["/override"]); assert.equal(parsed.projectNode?.defaultVersion, "22.2.0");
+    const parsed = parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/base"], installationRoots: ["/nodes"], defaultVersion: "v20.1.0" }, programs: {}, platforms: { [process.platform]: { projectNode: { enabledRoots: ["/override"], installationRoots: ["/nodes"], defaultVersion: "v22.2.0" } } } }); assert.deepEqual(parsed.projectNode?.enabledRoots, ["/override"]); assert.equal(parsed.projectNode?.defaultVersion, "22.2.0");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
