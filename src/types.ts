@@ -28,12 +28,15 @@ export interface ExecuteRequest {
   maxOutputBytes: number;
   input?: string;
   environment?: NodeJS.ProcessEnv;
+  onOutput?: (stream: "stdout" | "stderr", chunk: Buffer) => void | Promise<void>;
 }
 
 export interface StreamOutput {
   text: string;
   truncated: boolean;
   totalBytes: number;
+  omittedBytes: number;
+  lossyUtf8: boolean;
 }
 
 export interface NaturalTerminationOutcome {

@@ -32,7 +32,7 @@ test("stdio server lists dynamic programs and executes one", async () => {
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["system_environment", "system_exec"]);
+    assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["system_environment", "system_exec", "system_output"]);
     const execTool = listed.tools.find((tool) => tool.name === "system_exec");
     const programSchema = execTool?.inputSchema.properties?.program as { enum?: string[] } | undefined;
     assert.ok(programSchema?.enum?.includes("node"));

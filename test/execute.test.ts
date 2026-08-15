@@ -22,12 +22,12 @@ test("executeProgram passes arguments literally without a shell", async () => {
   assert.deepEqual(JSON.parse(result.stdout.text), values);
 });
 
-test("executeProgram keeps only the output tail", async () => {
+test("executeProgram keeps bounded output head and tail", async () => {
   const result = await executeProgram({
     program: nodeProgram, args: ["-e", "process.stdout.write('abcdefghij')"],
     cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 4,
   });
-  assert.equal(result.stdout.text, "ghij");
+  assert.equal(result.stdout.text, "abij");
   assert.equal(result.stdout.totalBytes, 10);
   assert.equal(result.stdout.truncated, true);
 });

@@ -39,6 +39,10 @@ export async function createServer(options: ServerOptions): Promise<McpServer> {
     const value = environmentValue(await runtime.inspectEnvironment());
     return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value };
   });
+  server.registerTool("system_output", {
+    description: "Read a bounded raw-output page from a completed Execution Artifact.",
+    inputSchema: { id: z.string(), stream: z.enum(["stdout", "stderr"]), offset: z.number().int().nonnegative(), limit: z.number().int().positive().max(1024 * 1024).optional(), encoding: z.enum(["utf8", "base64"]).optional() },
+  }, async ({ id, stream, offset, limit, encoding }) => { const value = await runtime.readOutput(id, stream, offset, limit ?? 64 * 1024, encoding ?? "utf8"); return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value as unknown as Record<string, unknown> }; });
   server.registerTool("system_exec", {
     description: "Execute one Registered Program directly. Check system_environment.argumentSemantics: native programs are literal; Windows .cmd/.bat Platform Wrappers are cmd-reparsed and reject %, !, &, |, <, >, ^, CR, LF, and NUL arguments. Even accepted wrapper arguments have narrower fidelity. Shell operators, pipelines, redirects, command substitution, and environment expansion are not supported.",
     inputSchema: {
