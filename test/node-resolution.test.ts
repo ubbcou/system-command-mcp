@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
 import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
+import { activeManagerTarget } from "../src/node-resolution.js";
 
 const binaryName = process.platform === "win32" ? "node.exe" : "node";
 async function node(root: string, version: string, npm = true): Promise<void> {
@@ -162,6 +163,12 @@ test("paired native npm accepts literal metacharacters and selected fallback pre
     await assert.rejects(instance.execute({ program: "npm", args: ["a&b"], cwd: root }), /UNSAFE_CMD_SCRIPT_ARGUMENT/);
     const path = await instance.execute({ program: "node", args: ["-e", "process.stdout.write(process.env.PATH ?? process.env.Path ?? '')"], cwd: project }); assert.equal(path.stdout.text.split(process.platform === "win32" ? ";" : ":")[0], dirname(selected));
   } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("active manager target linearizes at the captured readlink value", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-linear-")); const first = join(root, "v20.1.0"); const second = join(root, "v22.2.0"); await mkdir(first); await mkdir(second); const link = join(root, "current"); let current = first;
+  const read = async () => { const captured = current; current = second; return captured; };
+  try { assert.equal(await activeManagerTarget(link, read), await realpath(first)); assert.equal(await activeManagerTarget(link, read), await realpath(second)); } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("v2 active manager follows link changes without restart and exact selector wins", async () => {

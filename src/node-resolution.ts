@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { access, lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import semver from "semver";
@@ -230,15 +230,19 @@ function packageExactSelectors(pkg: Record<string, unknown>): Declaration[] {
   return exact;
 }
 
+type ReadActiveLink = (path: string) => Promise<string>;
+export async function activeManagerTarget(link: string, read: ReadActiveLink = readlink): Promise<string> {
+  const captured = await read(link);
+  return realpath(isAbsolute(captured) ? captured : resolve(dirname(link), captured));
+}
+
 async function activeManagerSelection(links: readonly string[], variants: readonly NodeVariant[], fallback: RegisteredProgram, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<NodeSelection> {
   const configured = links[0];
   if (!configured) throw new Error('PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE');
   const home = platform === 'win32' ? environment.USERPROFILE ?? homedir() : environment.HOME ?? homedir();
   const link = configured.startsWith('~/') ? resolve(home, configured.slice(2)) : resolve(configured);
   try {
-    const info = await lstat(link);
-    if (!info.isSymbolicLink()) throw new Error();
-    const target = await realpath(link);
+    const target = await activeManagerTarget(link);
     const selected = variants.find(variant => target === variant.versionDirectory || target === variant.executable);
     if (!selected) throw new Error();
     return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'active-manager' } };
