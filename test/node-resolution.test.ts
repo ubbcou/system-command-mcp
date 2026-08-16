@@ -112,6 +112,20 @@ test("v2 devEngines runtime selects only exact Node entries", async () => {
   } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("v2 ignores shadowed ancestor selectors but enforces ancestor engines", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-shadowed-")); await node(root, "v20.1.0"); await node(root, "v22.2.0");
+  const ancestor = join(root, "project"); const cwd = join(ancestor, "nested"); await mkdir(cwd, { recursive: true }); await writeFile(join(cwd, ".nvmrc"), "22.2.0"); const instance = await runtimeV2(root, root, "20.1.0");
+  try {
+    const cases: Record<string, unknown>[] = [
+      { volta: { node: 22 } },
+      { devEngines: { runtime: { name: "node", version: "22" } } },
+      { engines: { node: ">=20 <23" }, volta: { node: 22 }, devEngines: { runtime: { name: "node", version: "22" } } },
+    ];
+    for (const pkg of cases) { await writeFile(join(ancestor, "package.json"), JSON.stringify(pkg)); await writeFile(join(ancestor, ".nvmrc"), "not-a-range"); await writeFile(join(ancestor, ".node-version"), "also-invalid"); const result = await instance.execute({ program: "node", cwd }); assert.equal(result.programSelection?.version, "22.2.0"); }
+    await writeFile(join(ancestor, "package.json"), JSON.stringify({ engines: { node: "<22" }, volta: { node: 22 } })); await assert.rejects(instance.execute({ program: "node", cwd }), /PROJECT_NODE_RANGE_UNSATISFIED/);
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("v2 conflicts fail closed and keeps outside enabled roots static", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-v2-conflict-")); await node(root, "v22.2.0"); const project = join(root, "project"); const outside = join(root, "outside"); await mkdir(project); await mkdir(outside); await writeFile(join(project, ".nvmrc"), "22.2.0"); await writeFile(join(project, ".node-version"), "20.1.0");
   const instance = await runtimeV2(root, project, "v22.2.0");

@@ -184,6 +184,44 @@ async function declaration(directory: string): Promise<Declaration | undefined> 
   return pkg === undefined ? undefined : packageRequirement(pkg);
 }
 
+function packageObject(text: string): Record<string, unknown> {
+  try { const value: unknown = JSON.parse(text); if (!value || typeof value !== 'object' || Array.isArray(value)) declarationError('package.json'); return value as Record<string, unknown>; }
+  catch (error) { if (error instanceof Error && error.message.startsWith('NODE_DECLARATION_INVALID:')) throw error; return declarationError('package.json'); }
+}
+
+function packageEnginesRequirement(pkg: Record<string, unknown>): Declaration | undefined {
+  const engines = pkg.engines;
+  if (engines === undefined) return undefined;
+  if (!engines || typeof engines !== 'object' || Array.isArray(engines)) declarationError('package.json#engines.node');
+  const found = (engines as Record<string, unknown>).node;
+  if (found === undefined) return undefined;
+  if (typeof found !== 'string' || !semver.validRange(found)) declarationError('package.json#engines.node');
+  return { requirement: found, source: 'package.json#engines.node' };
+}
+
+function packageExactSelectors(pkg: Record<string, unknown>): Declaration[] {
+  const exact: Declaration[] = [];
+  const dev = pkg.devEngines;
+  if (dev !== undefined) {
+    if (!dev || typeof dev !== 'object' || Array.isArray(dev)) declarationError('package.json#devEngines.runtime');
+    const runtime = (dev as Record<string, unknown>).runtime;
+    for (const candidate of Array.isArray(runtime) ? runtime : runtime === undefined ? [] : [runtime]) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) declarationError('package.json#devEngines.runtime');
+      const entry = candidate as Record<string, unknown>;
+      if (entry.name !== 'node') continue;
+      if (typeof entry.version !== 'string' || !version(entry.version)) requirementError('package.json#devEngines.runtime');
+      exact.push({ requirement: entry.version, source: 'package.json#devEngines.runtime' });
+    }
+  }
+  const volta = pkg.volta;
+  if (volta !== undefined) {
+    if (!volta || typeof volta !== 'object' || Array.isArray(volta)) declarationError('package.json#volta.node');
+    const found = (volta as Record<string, unknown>).node;
+    if (found !== undefined) { if (typeof found !== 'string') declarationError('package.json#volta.node'); exact.push({ requirement: found, source: 'package.json#volta.node' }); }
+  }
+  return exact;
+}
+
 export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, defaultVersion: string): Promise<NodeSelection> {
   let directory = cwd;
   const ranges: Declaration[] = [];
@@ -192,26 +230,11 @@ export async function resolveProjectNodeV2(cwd: string, root: string, variants: 
     const pkg = await declarationFile(join(directory, 'package.json'), 'package.json', PACKAGE_LIMIT);
     const exact: Declaration[] = [];
     if (pkg !== undefined) {
-      let parsed: Record<string, unknown>;
-      try { const value: unknown = JSON.parse(pkg); if (!value || typeof value !== 'object' || Array.isArray(value)) declarationError('package.json'); parsed = value as Record<string, unknown>; } catch (error) { if (error instanceof Error && error.message.startsWith('NODE_DECLARATION_INVALID:')) throw error; return declarationError('package.json'); }
-      const dev = parsed.devEngines;
-      if (dev !== undefined) {
-        if (!dev || typeof dev !== 'object' || Array.isArray(dev)) declarationError('package.json#devEngines.runtime');
-        const runtime = (dev as Record<string, unknown>).runtime;
-        for (const candidate of Array.isArray(runtime) ? runtime : runtime === undefined ? [] : [runtime]) {
-          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) declarationError('package.json#devEngines.runtime');
-          const entry = candidate as Record<string, unknown>;
-          if (entry.name !== 'node') continue;
-          if (typeof entry.version !== 'string' || !version(entry.version)) requirementError('package.json#devEngines.runtime');
-          exact.push({ requirement: entry.version, source: 'package.json#devEngines.runtime' });
-        }
-      }
-      const volta = parsed.volta;
-      if (volta !== undefined) { if (!volta || typeof volta !== 'object' || Array.isArray(volta)) declarationError('package.json#volta.node'); const found = (volta as Record<string, unknown>).node; if (found !== undefined) { if (typeof found !== 'string') declarationError('package.json#volta.node'); exact.push({ requirement: found, source: 'package.json#volta.node' }); } }
-      const engines = parsed.engines;
-      if (engines !== undefined) { if (!engines || typeof engines !== 'object' || Array.isArray(engines)) declarationError('package.json#engines.node'); const found = (engines as Record<string, unknown>).node; if (found !== undefined) { if (typeof found !== 'string' || !semver.validRange(found)) declarationError('package.json#engines.node'); ranges.push({ requirement: found, source: 'package.json#engines.node' }); } }
+      const parsed = packageObject(pkg);
+      const engines = packageEnginesRequirement(parsed); if (engines) ranges.push(engines);
+      if (!nearestExact) exact.push(...packageExactSelectors(parsed));
     }
-    for (const name of ['.nvmrc', '.node-version']) { const text = await declarationFile(join(directory, name), name, VERSION_FILE_LIMIT); if (text !== undefined) exact.push({ requirement: text.trim(), source: name }); }
+    if (!nearestExact) for (const name of ['.nvmrc', '.node-version']) { const text = await declarationFile(join(directory, name), name, VERSION_FILE_LIMIT); if (text !== undefined) exact.push({ requirement: text.trim(), source: name }); }
     if (exact.length && !nearestExact) nearestExact = exact;
     if (directory === root) break;
     const parent = dirname(directory); if (parent === directory) break; directory = parent;
