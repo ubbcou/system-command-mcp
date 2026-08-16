@@ -208,6 +208,18 @@ _Avoid_: Startup check, health command
 The platform-specific identity of an authorized Working Directory Root captured at startup, when available, to detect replacement of the directory object at the same path.
 _Avoid_: Root path, real path
 
-**Node Project Resolver**:
-The optional Program Variant Set for `node` and per-Execution Request project-declaration selection that preserves `node` as one Logical Program while selecting an executable without changing global state.
-_Avoid_: Node switcher, active Node version
+**Project Node Resolution**:
+The Manifest v2 exception that lets an authorized project's Node declaration select a compatible Program Variant from the immutable startup Program Variant Set without changing the Registered Program's static fallback or global state.
+_Avoid_: Node switcher, active Node version, Node installation
+
+**Project Node Boundary**:
+An enabled Working Directory Root that is the sole upper boundary for locating Project Node Declarations for requests inside it; repository, VCS, package-workspace, and monorepo boundaries have no role.
+_Avoid_: Repository root, workspace root, Git root
+
+**Project Node Declaration**:
+Supported project metadata inside a Project Node Boundary that provides either an exact Node selection or an `engines.node` compatibility constraint; declarations are re-read for each Execution Request and are not part of Manifest or PATH watching.
+_Avoid_: Manifest override, watched config, active version file
+
+**Project Node Default**:
+The exact Node version declared by Manifest v2 for eligible requests that have no project exact selection; it is checked against project compatibility constraints and is unrelated to a version manager's default or alias.
+_Avoid_: Manager default, active version, fallback Candidate

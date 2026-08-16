@@ -9,6 +9,7 @@ import type { ProgramSelection, RegisteredProgram } from "./types.js";
 const PACKAGE_LIMIT = 1024 * 1024;
 const VERSION_FILE_LIMIT = 4096;
 export interface NodeResolution { enabled: boolean; installationRoots?: string[]; }
+export interface ProjectNodeResolution { enabledRoots: string[]; installationRoots: string[]; defaultVersion: string; }
 type NodeIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint };
 export interface NodeVariant { version: string; versionDirectory: string; versionDirectoryIdentity: NodeIdentity; executable: string; executableIdentity: NodeIdentity; npmCli?: string; npmCliIdentity?: NodeIdentity; npxCli?: string; npxCliIdentity?: NodeIdentity; }
 export interface NodeSelection { program: RegisteredProgram; selection?: ProgramSelection; variant?: NodeVariant; }
@@ -26,10 +27,25 @@ export function parseNodeResolution(value: unknown, path: string): NodeResolutio
   return { enabled: item.enabled ?? false, installationRoots: item.installationRoots === undefined ? undefined : [...item.installationRoots as string[]] };
 }
 
-function roots(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
+export function parseProjectNodeResolution(value: unknown, path: string): ProjectNodeResolution | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`INVALID_MANIFEST: ${path} must be an object`);
+  const item = value as Record<string, unknown>;
+  for (const key of Object.keys(item)) if (!['enabledRoots', 'installationRoots', 'defaultVersion'].includes(key)) throw new Error(`INVALID_MANIFEST: unknown field ${path}.${key}`);
+  const paths = (key: 'enabledRoots' | 'installationRoots'): string[] => {
+    const entries = item[key];
+    if (!Array.isArray(entries) || !entries.length || !entries.every(root => typeof root === 'string' && (isAbsolute(root) || root.startsWith('~/')))) throw new Error(`INVALID_MANIFEST: ${path}.${key}`);
+    return [...entries];
+  };
+  const defaultVersion = item.defaultVersion;
+  if (typeof defaultVersion !== 'string' || !version(defaultVersion)) throw new Error(`INVALID_MANIFEST: ${path}.defaultVersion`);
+  return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: version(defaultVersion)! };
+}
+
+export function effectiveNodeInstallationRoots(configuration: Pick<NodeResolution, "installationRoots">, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
   const configured = configuration.installationRoots;
-  if (configured !== undefined) return [...new Set(configured.map(root => root.startsWith("~/") ? resolve(homedir(), root.slice(2)) : resolve(root)))];
-  const home = homedir();
+  const home = platform === "win32" ? environment.USERPROFILE ?? homedir() : environment.HOME ?? homedir();
+  if (configured !== undefined) return [...new Set(configured.map(root => root.startsWith("~/") ? resolve(home, root.slice(2)) : resolve(root)))];
   const defaults = platform === "win32"
     ? [environment.NVM_HOME, join(home, "AppData", "Roaming", "nvm"), join(home, ".volta", "tools", "image", "node")]
     : [join(home, ".nvm", "versions", "node"), join(home, ".volta", "tools", "image", "node"), join(home, ".fnm", "node-versions"), join(home, ".asdf", "installs", "nodejs")];
@@ -110,7 +126,7 @@ export async function revalidateNodeVariant(variant: NodeVariant, platform: Node
 
 export async function discoverNodeVariants(configuration: NodeResolution, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<readonly NodeVariant[]> {
   if (!configuration.enabled) return [];
-  const variants = (await Promise.all(roots(configuration, environment, platform).map(root => scan(root, platform)))).flat();
+  const variants = (await Promise.all(effectiveNodeInstallationRoots(configuration, environment, platform).map(root => scan(root, platform)))).flat();
   const unique = new Map<string, NodeVariant>();
   for (const item of variants) if (!unique.has(`${item.version}:${item.executable}`)) unique.set(`${item.version}:${item.executable}`, item);
   return Object.freeze([...unique.values()].sort((a, b) => semver.rcompare(a.version, b.version) || a.executable.localeCompare(b.executable)).map(item => Object.freeze({ ...item })));
@@ -168,6 +184,77 @@ async function declaration(directory: string): Promise<Declaration | undefined> 
   return pkg === undefined ? undefined : packageRequirement(pkg);
 }
 
+function packageObject(text: string): Record<string, unknown> {
+  try { const value: unknown = JSON.parse(text); if (!value || typeof value !== 'object' || Array.isArray(value)) declarationError('package.json'); return value as Record<string, unknown>; }
+  catch (error) { if (error instanceof Error && error.message.startsWith('NODE_DECLARATION_INVALID:')) throw error; return declarationError('package.json'); }
+}
+
+function packageEnginesRequirement(pkg: Record<string, unknown>): Declaration | undefined {
+  const engines = pkg.engines;
+  if (engines === undefined) return undefined;
+  if (!engines || typeof engines !== 'object' || Array.isArray(engines)) declarationError('package.json#engines.node');
+  const found = (engines as Record<string, unknown>).node;
+  if (found === undefined) return undefined;
+  if (typeof found !== 'string' || !semver.validRange(found)) declarationError('package.json#engines.node');
+  return { requirement: found, source: 'package.json#engines.node' };
+}
+
+function packageExactSelectors(pkg: Record<string, unknown>): Declaration[] {
+  const exact: Declaration[] = [];
+  const dev = pkg.devEngines;
+  if (dev !== undefined) {
+    if (!dev || typeof dev !== 'object' || Array.isArray(dev)) declarationError('package.json#devEngines.runtime');
+    const runtime = (dev as Record<string, unknown>).runtime;
+    for (const candidate of Array.isArray(runtime) ? runtime : runtime === undefined ? [] : [runtime]) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) declarationError('package.json#devEngines.runtime');
+      const entry = candidate as Record<string, unknown>;
+      if (entry.name !== 'node') continue;
+      if (typeof entry.version !== 'string' || !version(entry.version)) requirementError('package.json#devEngines.runtime');
+      exact.push({ requirement: entry.version, source: 'package.json#devEngines.runtime' });
+    }
+  }
+  const volta = pkg.volta;
+  if (volta !== undefined) {
+    if (!volta || typeof volta !== 'object' || Array.isArray(volta)) declarationError('package.json#volta.node');
+    const found = (volta as Record<string, unknown>).node;
+    if (found !== undefined) { if (typeof found !== 'string') declarationError('package.json#volta.node'); exact.push({ requirement: found, source: 'package.json#volta.node' }); }
+  }
+  return exact;
+}
+
+export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, defaultVersion: string): Promise<NodeSelection> {
+  let directory = cwd;
+  const ranges: Declaration[] = [];
+  let nearestExact: Declaration[] | undefined;
+  while (isWithinRoot(root, directory)) {
+    const pkg = await declarationFile(join(directory, 'package.json'), 'package.json', PACKAGE_LIMIT);
+    const exact: Declaration[] = [];
+    if (pkg !== undefined) {
+      const parsed = packageObject(pkg);
+      const engines = packageEnginesRequirement(parsed); if (engines) ranges.push(engines);
+      if (!nearestExact) exact.push(...packageExactSelectors(parsed));
+    }
+    if (!nearestExact) for (const name of ['.nvmrc', '.node-version']) { const text = await declarationFile(join(directory, name), name, VERSION_FILE_LIMIT); if (text !== undefined) exact.push({ requirement: text.trim(), source: name }); }
+    if (exact.length && !nearestExact) nearestExact = exact;
+    if (directory === root) break;
+    const parent = dirname(directory); if (parent === directory) break; directory = parent;
+  }
+  if (nearestExact) {
+    const normalized = nearestExact.map(found => ({ ...found, requirement: version(found.requirement) }));
+    if (normalized.some(found => !found.requirement)) throw new Error(`NODE_VERSION_REQUIREMENT_INVALID: ${nearestExact[0]!.source}`);
+    if (new Set(normalized.map(found => found.requirement)).size !== 1) throw new Error('PROJECT_NODE_DECLARATION_CONFLICT');
+    const found = normalized[0]!; const selected = variants.find(item => item.version === found.requirement);
+    if (!selected) throw new Error(`PROJECT_NODE_VERSION_UNAVAILABLE: ${found.source}`);
+    if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
+    return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: found.source } };
+  }
+  if (!defaultVersion) return { program: fallback };
+  const selected = variants.find(item => item.version === defaultVersion);
+  if (!selected) throw new Error('PROJECT_NODE_VERSION_UNAVAILABLE: manifest#projectNode.defaultVersion');
+  if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
+  return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'manifest#projectNode.defaultVersion' } };
+}
+
 export async function projectNodeSelection(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram): Promise<NodeSelection> {
   let directory = cwd;
   while (isWithinRoot(root, directory)) {
@@ -186,6 +273,10 @@ export async function projectNodeSelection(cwd: string, root: string, variants: 
 }
 
 export function withNodePath(environment: NodeJS.ProcessEnv, selected: RegisteredProgram, platform: NodeJS.Platform): NodeJS.ProcessEnv {
-  const result = { ...environment }; const key = platform === "win32" ? Object.keys(result).find(name => name.toLowerCase() === "path") ?? "PATH" : "PATH";
-  result[key] = [dirname(selected.executable), result[key]].filter(Boolean).join(platform === "win32" ? ";" : delimiter); return result;
+  const result = { ...environment };
+  if (platform === "win32") {
+    const keys = Object.keys(result).filter(name => name.toLowerCase() === "path"); const value = keys.map(key => result[key]).find(Boolean); for (const key of keys) delete result[key];
+    result.PATH = [dirname(selected.executable), value].filter(Boolean).join(";");
+  } else result.PATH = [dirname(selected.executable), result.PATH].filter(Boolean).join(delimiter);
+  return result;
 }

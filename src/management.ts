@@ -2,6 +2,7 @@ import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { configuredResolutionPlan, createCommandRuntime, effectiveTimeoutMs, parseProgramManifest, type CommandRuntimeOptions } from "./runtime.js";
+import { discoverNodeVariants, effectiveNodeInstallationRoots } from "./node-resolution.js";
 import { parseManifestProbes } from "./manifest-probes.js";
 import { validateRuntimeLimits } from "./config.js";
 import { DEFAULT_ALIASES, resolveExecutable, resolveExecutableMatches } from "./program-registry.js";
@@ -50,6 +51,55 @@ export async function validatedManifest(path: string): Promise<unknown> {
   const manifest = await readManifest(path);
   parseProgramManifest(manifest);
   return manifest;
+}
+
+type JsonObject = Record<string, unknown>;
+const jsonObject = (value: unknown): JsonObject => value as JsonObject;
+const sameNodeResolution = (left: JsonObject | undefined, right: JsonObject | undefined): boolean => {
+  const normalized = (value: JsonObject | undefined) => ({ enabled: value?.enabled ?? false, installationRoots: value?.installationRoots ?? undefined });
+  return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right));
+};
+
+export async function migrateManifest(input: string, output = `${input}.v2.json`, roots: readonly string[]): Promise<string> {
+  if (!roots.length) throw new Error("ROOT_REQUIRED");
+  const raw = await readManifest(input);
+  const manifest = jsonObject(raw);
+  const platforms = jsonObject(manifest.platforms ?? {});
+  const baseResolution = manifest.nodeResolution as JsonObject | undefined;
+  if (baseResolution?.enabled !== true) throw new Error("MIGRATION_NOT_APPLICABLE");
+  for (const value of Object.values(platforms)) {
+    const override = jsonObject(value).nodeResolution as JsonObject | undefined;
+    if (override !== undefined && !sameNodeResolution(baseResolution, override)) throw new Error("MIGRATION_PLATFORM_OVERRIDE_UNSUPPORTED");
+  }
+  const plan = configuredResolutionPlan(raw);
+  const definition = plan.manifest.programs.node;
+  if (!definition || definition.enabled === false) throw new Error("MIGRATION_DEFAULT_VERSION_UNAVAILABLE");
+  const environment = plan.programEnvironment(definition);
+  const path = process.platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === "path")?.[1] : environment.PATH;
+  const pathExt = process.platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === "pathext")?.[1] : undefined;
+  let executable: string | undefined;
+  for (const candidate of definition.candidates) {
+    executable = await resolveExecutable([candidate], { platform: process.platform, manifestDirectory: dirname(resolve(input)), path, pathExt });
+    if (executable) break;
+  }
+  const installationRoots = effectiveNodeInstallationRoots({ installationRoots: baseResolution.installationRoots as string[] | undefined }, process.env, process.platform);
+  const variants = await discoverNodeVariants({ enabled: true, installationRoots }, process.env, process.platform);
+  const selected = variants.find(variant => variant.executable === executable);
+  if (!selected) throw new Error("MIGRATION_DEFAULT_VERSION_UNAVAILABLE");
+  const migratedPlatforms = Object.fromEntries(Object.entries(platforms).map(([name, value]) => { const platform = { ...jsonObject(value) }; delete platform.nodeResolution; return [name, platform]; }));
+  const migrated: JsonObject = {
+    ...manifest,
+    version: 2,
+    projectNode: { installationRoots, enabledRoots: [...roots], defaultVersion: selected.version },
+    ...(manifest.platforms === undefined ? {} : { platforms: migratedPlatforms }),
+  };
+  delete migrated.nodeResolution;
+  parseProgramManifest(migrated);
+  const candidate = await createCommandRuntime({ roots: roots.map(root => resolve(root)), manifest: migrated, manifestDirectory: dirname(resolve(output)) });
+  await candidate.close();
+  try { await writeFile(output, `${JSON.stringify(migrated, null, 2)}\n`, { encoding: "utf8", flag: "wx" }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`MANIFEST_EXISTS: ${output}`); throw error; }
+  return output;
 }
 
 export async function writeManifestTemplate(path: string, force = false, content = MANIFEST_TEMPLATE): Promise<void> {

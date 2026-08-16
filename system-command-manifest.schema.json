@@ -1,31 +1,204 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "System Command MCP Program Manifest v1",
-  "type": "object",
-  "required": ["version", "programs"],
-  "additionalProperties": false,
-  "properties": {
-    "version": { "const": 1 },
-    "searchPath": { "$ref": "#/$defs/strings" },
-    "pathExt": { "type": "string" },
-    "allowInheritedPath": { "type": "boolean" },
-    "environment": { "$ref": "#/$defs/environment" },
-    "nodeResolution": { "$ref": "#/$defs/nodeResolution" },
-    "programs": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/program" } },
-    "platforms": { "type": "object", "additionalProperties": { "$ref": "#/$defs/platform" } },
-    "probes": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/probe" } }
-  },
+  "title": "System Command MCP Program Manifest",
+  "oneOf": [
+    { "$ref": "#/$defs/manifestV1" },
+    { "$ref": "#/$defs/manifestV2" }
+  ],
   "$defs": {
-    "strings": { "type": "array", "items": { "type": "string" } },
-    "environmentValue": { "oneOf": [{ "type": "string" }, { "type": "object", "additionalProperties": false, "required": ["fromEnvironment"], "properties": { "fromEnvironment": { "type": "string" }, "required": { "type": "boolean" } } }] },
-    "environment": { "type": "object", "additionalProperties": false, "properties": { "remove": { "$ref": "#/$defs/strings" }, "set": { "type": "object", "additionalProperties": { "$ref": "#/$defs/environmentValue" } } } },
-    "policy": { "type": "object", "additionalProperties": false, "properties": { "defaultTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 }, "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 }, "allowStdin": { "type": "boolean" }, "gracePeriodMs": { "type": "integer", "minimum": 1, "maximum": 60000 }, "finalTerminationWaitMs": { "type": "integer", "minimum": 1, "maximum": 60000 }, "artifactPolicy": { "enum": ["never", "on-truncation", "always"] } } },
-    "nodeResolution": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean", "default": false }, "installationRoots": { "type": "array", "items": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|/|~/)" } } } },
-    "programFields": { "type": "object", "additionalProperties": false, "properties": { "candidates": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }, "required": { "type": "boolean" }, "enabled": { "type": "boolean" }, "policy": { "$ref": "#/$defs/policy" }, "environment": { "$ref": "#/$defs/environment" } } },
-    "program": { "allOf": [{ "$ref": "#/$defs/programFields" }, { "required": ["candidates"] }] },
+    "strings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "absoluteOrHomePath": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|~/)"
+    },
+    "environmentValue": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fromEnvironment"],
+          "properties": {
+            "fromEnvironment": { "type": "string" },
+            "required": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "remove": { "$ref": "#/$defs/strings" },
+        "set": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/environmentValue" }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaultTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 },
+        "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 },
+        "allowStdin": { "type": "boolean" },
+        "gracePeriodMs": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "finalTerminationWaitMs": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "artifactPolicy": { "enum": ["never", "on-truncation", "always"] }
+      }
+    },
+    "nodeResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "installationRoots": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/absoluteOrHomePath" }
+        }
+      }
+    },
+    "projectNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabledRoots", "installationRoots", "defaultVersion"],
+      "properties": {
+        "enabledRoots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/absoluteOrHomePath" }
+        },
+        "installationRoots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/absoluteOrHomePath" }
+        },
+        "defaultVersion": {
+          "type": "string",
+          "pattern": "^v?(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        }
+      }
+    },
+    "programFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "required": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "policy": { "$ref": "#/$defs/policy" },
+        "environment": { "$ref": "#/$defs/environment" }
+      }
+    },
+    "program": {
+      "allOf": [
+        { "$ref": "#/$defs/programFields" },
+        { "required": ["candidates"] }
+      ]
+    },
     "partialProgram": { "$ref": "#/$defs/programFields" },
-    "platform": { "type": "object", "additionalProperties": false, "properties": { "searchPath": { "$ref": "#/$defs/strings" }, "pathExt": { "type": "string" }, "allowInheritedPath": { "type": "boolean" }, "environment": { "$ref": "#/$defs/environment" }, "nodeResolution": { "$ref": "#/$defs/nodeResolution" }, "programs": { "type": "object", "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" }, "additionalProperties": { "$ref": "#/$defs/partialProgram" } } } },
-    "probe": { "type": "object", "additionalProperties": false, "properties": { "args": { "$ref": "#/$defs/strings" }, "acceptedExitCodes": { "type": "array", "items": { "type": "integer" } }, "cwd": { "type": "string", "pattern": "^(?:[A-Za-z]:[\\\\/]|/)" } } }
+    "programs": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" },
+      "additionalProperties": { "$ref": "#/$defs/program" }
+    },
+    "partialPrograms": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" },
+      "additionalProperties": { "$ref": "#/$defs/partialProgram" }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "args": { "$ref": "#/$defs/strings" },
+        "acceptedExitCodes": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "cwd": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/)"
+        }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$" },
+      "additionalProperties": { "$ref": "#/$defs/probe" }
+    },
+    "platformV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "searchPath": { "$ref": "#/$defs/strings" },
+        "pathExt": { "type": "string" },
+        "allowInheritedPath": { "type": "boolean" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "nodeResolution": { "$ref": "#/$defs/nodeResolution" },
+        "programs": { "$ref": "#/$defs/partialPrograms" }
+      }
+    },
+    "platformV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "searchPath": { "$ref": "#/$defs/strings" },
+        "pathExt": { "type": "string" },
+        "allowInheritedPath": { "type": "boolean" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "projectNode": { "$ref": "#/$defs/projectNode" },
+        "programs": { "$ref": "#/$defs/partialPrograms" }
+      }
+    },
+    "manifestV1": {
+      "title": "Program Manifest v1 (transition)",
+      "type": "object",
+      "required": ["version", "programs"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "const": 1 },
+        "searchPath": { "$ref": "#/$defs/strings" },
+        "pathExt": { "type": "string" },
+        "allowInheritedPath": { "type": "boolean" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "nodeResolution": { "$ref": "#/$defs/nodeResolution" },
+        "programs": { "$ref": "#/$defs/programs" },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/platformV1" }
+        },
+        "probes": { "$ref": "#/$defs/probes" }
+      }
+    },
+    "manifestV2": {
+      "title": "Program Manifest v2",
+      "type": "object",
+      "required": ["version", "programs"],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "const": 2 },
+        "searchPath": { "$ref": "#/$defs/strings" },
+        "pathExt": { "type": "string" },
+        "allowInheritedPath": { "type": "boolean" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "projectNode": { "$ref": "#/$defs/projectNode" },
+        "programs": { "$ref": "#/$defs/programs" },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/platformV2" }
+        },
+        "probes": { "$ref": "#/$defs/probes" }
+      }
+    }
   },
-  "$comment": "Runtime additionally rejects required programs disabled by base/platform merging and policies whose defaultTimeoutMs exceeds maxTimeoutMs."
+  "$comment": "Runtime additionally rejects required programs disabled by base/platform merging, policies whose defaultTimeoutMs exceeds maxTimeoutMs, projectNode.enabledRoots outside Host Authorization, defaultVersion values absent from the startup Program Variant Set, and incompatible Project Node Declarations. In v2 an active platform projectNode object fully replaces the top-level projectNode object."
 }

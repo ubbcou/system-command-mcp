@@ -1,12 +1,12 @@
 import { realpath, stat } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, resolve, join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { ArtifactStore, type ArtifactPolicy, type ArtifactStatus, type OutputEncoding, type OutputPage, type OutputStream } from "./artifact.js";
 import { executeProgram } from "./execute.js";
 import { DEFAULT_ALIASES, inspectEnvironment, resolveExecutable } from "./program-registry.js";
 import { isWithinRoot } from "./path-policy.js";
 import { parseManifestProbes } from "./manifest-probes.js";
-import { discoverNodeVariants, parseNodeResolution, projectNodeSelection, revalidateNodeVariant, withNodePath, type NodeResolution, type NodeVariant } from "./node-resolution.js";
+import { discoverNodeVariants, parseNodeResolution, parseProjectNodeResolution, projectNodeSelection, resolveProjectNodeV2, revalidateNodeVariant, withNodePath, type NodeResolution, type NodeVariant, type NodeSelection, type ProjectNodeResolution } from "./node-resolution.js";
 import { DEFAULT_MAX_CONCURRENT_EXECUTIONS, MAX_CONCURRENT_EXECUTIONS, MAX_DEFAULT_TIMEOUT_MS, validateRuntimeLimits } from "./config.js";
 import type { EnvironmentSnapshot, ExecuteResult, RegisteredProgram } from "./types.js";
 
@@ -15,7 +15,7 @@ export interface ManifestProgram { candidates: string[]; required?: boolean; ena
 export interface EnvironmentReference { fromEnvironment: string; required?: boolean; }
 export type EnvironmentValue = string | EnvironmentReference;
 export interface EnvironmentLayer { remove?: string[]; set?: Record<string, EnvironmentValue>; }
-export interface ProgramManifest { version: 1; searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; nodeResolution?: NodeResolution; programs: Record<string, ManifestProgram>; platforms?: Record<string, { searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; nodeResolution?: NodeResolution; programs?: Record<string, Partial<ManifestProgram>> }>; }
+export interface ProgramManifest { version: 1 | 2; searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; nodeResolution?: NodeResolution; projectNode?: ProjectNodeResolution; programs: Record<string, ManifestProgram>; platforms?: Record<string, { searchPath?: string[]; pathExt?: string; allowInheritedPath?: boolean; environment?: EnvironmentLayer; nodeResolution?: NodeResolution; projectNode?: ProjectNodeResolution; programs?: Record<string, Partial<ManifestProgram>> }>; }
 export interface RuntimeEnvironment extends EnvironmentSnapshot { mode: "configured" | "automatic-discovery"; roots: string[]; environmentNames: string[]; }
 export interface ExecutionRequest { program: string; args?: readonly string[]; cwd?: string; timeoutMs?: number; input?: string; signal?: AbortSignal; }
 export interface CommandRuntime { inspectEnvironment(): Promise<RuntimeEnvironment>; execute(request: ExecutionRequest): Promise<ExecuteResult & { artifact: ArtifactStatus }>; readOutput(id: string, stream: OutputStream, offset: number, limit: number, encoding: OutputEncoding): Promise<OutputPage>; close(): Promise<void>; }
@@ -67,8 +67,11 @@ function validatePolicy(value: ProgramPolicy | undefined, path: string): void { 
 export function effectiveTimeoutMs(policy: ProgramPolicy | undefined, globalDefaultTimeoutMs?: number, suppliedTimeoutMs?: number): number { return suppliedTimeoutMs ?? policy?.defaultTimeoutMs ?? globalDefaultTimeoutMs ?? 30_000; }
 
 export function parseProgramManifest(value: unknown, platform: NodeJS.Platform = process.platform): ProgramManifest {
-  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "nodeResolution", "programs", "platforms", "probes"], "manifest");
-  if (root.version !== 1) throw new Error("INVALID_MANIFEST: version must be 1");
+  const root = object(value, "manifest"); unknownFields(root, ["version", "searchPath", "pathExt", "allowInheritedPath", "environment", "nodeResolution", "projectNode", "programs", "platforms", "probes"], "manifest");
+  if (root.version !== 1 && root.version !== 2) throw new Error("INVALID_MANIFEST: version must be 1 or 2");
+  if (root.version === 1 && root.projectNode !== undefined) throw new Error("INVALID_MANIFEST: manifest.projectNode");
+  if (root.version === 2 && root.nodeResolution !== undefined) throw new Error("INVALID_MANIFEST: manifest.nodeResolution");
+  if (root.version === 2) parseProjectNodeResolution(root.projectNode, "manifest.projectNode");
   if (!root.programs) throw new Error("INVALID_MANIFEST: programs is required");
   if (root.searchPath !== undefined && (!Array.isArray(root.searchPath) || !root.searchPath.every(x => typeof x === "string"))) throw new Error("INVALID_MANIFEST: searchPath");
   if (root.pathExt !== undefined && typeof root.pathExt !== "string") throw new Error("INVALID_MANIFEST: pathExt");
@@ -82,12 +85,15 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const platforms = root.platforms === undefined ? {} : object(root.platforms, "manifest.platforms");
   const platformOverrides: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(platforms)) {
-    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "pathExt", "allowInheritedPath", "environment", "nodeResolution", "programs"], `manifest.platforms.${name}`);
+    const item = object(raw, `manifest.platforms.${name}`); unknownFields(item, ["searchPath", "pathExt", "allowInheritedPath", "environment", "nodeResolution", "projectNode", "programs"], `manifest.platforms.${name}`);
+    if (root.version === 1 && item.projectNode !== undefined) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.projectNode`);
+    if (root.version === 2 && item.nodeResolution !== undefined) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.nodeResolution`);
     if (item.searchPath !== undefined && (!Array.isArray(item.searchPath) || !item.searchPath.every(x => typeof x === "string"))) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.searchPath`);
     if (item.pathExt !== undefined && typeof item.pathExt !== "string") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.pathExt`);
     if (item.allowInheritedPath !== undefined && typeof item.allowInheritedPath !== "boolean") throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.allowInheritedPath`);
     layer(item.environment, `manifest.platforms.${name}.environment`);
-    parseNodeResolution(item.nodeResolution, `manifest.platforms.${name}.nodeResolution`);
+    if (root.version === 1) parseNodeResolution(item.nodeResolution, `manifest.platforms.${name}.nodeResolution`);
+    else parseProjectNodeResolution(item.projectNode, `manifest.platforms.${name}.projectNode`);
     const overrides = item.programs === undefined ? {} : object(item.programs, `manifest.platforms.${name}.programs`);
     for (const [programName, definition] of Object.entries(overrides)) {
       if (!LOGICAL_PROGRAM_NAME.test(programName)) throw new Error(`INVALID_MANIFEST: manifest.platforms.${name}.programs.${programName}`);
@@ -104,7 +110,7 @@ export function parseProgramManifest(value: unknown, platform: NodeJS.Platform =
   const overrides = override.programs === undefined ? {} : object(override.programs, `manifest.platforms.${platform}.programs`);
   for (const [name, item] of Object.entries(overrides)) programs[name] = mergeProgram(programs[name]!, program(item, `manifest.platforms.${platform}.programs.${name}`, true) as Partial<ManifestProgram>);
   for (const [name, definition] of Object.entries(programs)) if (definition.required && definition.enabled === false) throw new Error(`INVALID_MANIFEST: required Program ${name} cannot be disabled`);
-  return { version: 1, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)), nodeResolution: parseNodeResolution(override.nodeResolution ?? root.nodeResolution, `manifest.platforms.${platform}.nodeResolution`) };
+  return { version: root.version, programs, searchPath: [...((override.searchPath as string[] | undefined) ?? []), ...((root.searchPath as string[] | undefined) ?? [])], pathExt: (override.pathExt as string | undefined) ?? root.pathExt as string | undefined, allowInheritedPath: (override.allowInheritedPath as boolean | undefined) ?? root.allowInheritedPath as boolean | undefined, environment: mergeLayer(layer(root.environment, "manifest.environment"), layer(override.environment, `manifest.platforms.${platform}.environment`)), nodeResolution: root.version === 1 ? parseNodeResolution(override.nodeResolution ?? root.nodeResolution, `manifest.platforms.${platform}.nodeResolution`) : undefined, projectNode: root.version === 2 ? parseProjectNodeResolution(override.projectNode ?? root.projectNode, `manifest.platforms.${platform}.projectNode`) : undefined };
 }
 
 function get(environment: Record<string, string>, key: string, platform: NodeJS.Platform): string | undefined { return platform === "win32" ? Object.entries(environment).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1] : environment[key]; }
@@ -137,9 +143,11 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   const plan = configured ? configuredResolutionPlan(options.manifest, input, platform) : undefined;
   const manifest = plan?.manifest;
   const nodeResolution = manifest?.nodeResolution;
+  const projectNode = manifest?.projectNode;
   const manifestDirectory = options.manifestPath ? dirname(resolve(options.manifestPath)) : options.manifestDirectory;
   const environment: Record<string, string> = plan?.environment ?? { ...input };
-  const nodeVariants: readonly NodeVariant[] = nodeResolution ? await discoverNodeVariants(nodeResolution, input, platform) : [];
+  const enabledProjectRoots = projectNode ? (await Promise.all(projectNode.enabledRoots.map(async configuredRoot => { const wanted = configuredRoot.startsWith("~/") ? resolve(homedir(), configuredRoot.slice(2)) : resolve(configuredRoot); let actual: string; try { actual = await realpath(wanted); if (!(await stat(actual)).isDirectory()) throw new Error(); } catch { throw new Error("PROJECT_NODE_ROOT_UNAVAILABLE"); } if (!roots.some(root => isWithinRoot(root, actual))) throw new Error("PROJECT_NODE_ROOT_NOT_AUTHORIZED"); return actual; }))).sort((left, right) => right.length - left.length || left.localeCompare(right)) : [];
+  const nodeVariants: readonly NodeVariant[] = nodeResolution ? await discoverNodeVariants(nodeResolution, input, platform) : projectNode ? await discoverNodeVariants({ enabled: true, installationRoots: projectNode.installationRoots }, input, platform) : [];
   const definitions: Record<string, ManifestProgram> = manifest?.programs ?? Object.fromEntries(Object.entries(DEFAULT_ALIASES).filter(([name]) => name !== "powershell").map(([name, candidates]) => [name, { candidates: [...candidates] }]));
   const programs: Record<string, RegisteredProgram> = {};
   const policies: Record<string, ProgramPolicy> = {};
@@ -156,9 +164,12 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     const kind = /\.(cmd|bat)$/i.test(executable) ? "cmd-script" : "native";
     programs[logicalName] = { logicalName, executable, declaredCandidate, kind, argumentSemantics: kind === "native" ? "literal" : "cmd-reparsed" }; policies[logicalName] = definition.policy ?? {};
   }
-  if (nodeResolution?.enabled) {
+  if (nodeResolution?.enabled || projectNode) {
     if (!programs.node || programs.node.kind !== "native" || definitions.node?.enabled === false) throw new Error("NODE_RESOLUTION_NODE_REQUIRED");
     if (!nodeVariants.length) throw new Error("NODE_VARIANTS_UNAVAILABLE");
+    if (projectNode?.defaultVersion && !nodeVariants.some(variant => variant.version === projectNode.defaultVersion)) throw new Error("PROJECT_NODE_VERSION_UNAVAILABLE: manifest#projectNode.defaultVersion");
+    if (projectNode && programs.npm && nodeVariants.some(variant => !variant.npmCli)) throw new Error("PROJECT_NPM_UNAVAILABLE");
+    if (projectNode && programs.npx && nodeVariants.some(variant => !variant.npxCli)) throw new Error("PROJECT_NPX_UNAVAILABLE");
   }
   if (configured && !Object.keys(programs).length) throw new Error("NO_PROGRAMS_REGISTERED");
   const artifacts = new ArtifactStore(options.artifactDirectory ?? join(tmpdir(), "system-command-mcp-artifacts"), options.artifactRetentionMs ?? 24 * 60 * 60 * 1000, options.artifactQuotaBytes ?? 1024 * 1024 * 1024, options.artifactMaxStreamBytes ?? 100 * 1024 * 1024);
@@ -166,7 +177,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
   let closing = false;
   let closePromise: Promise<void> | undefined;
   const active = new Map<Promise<ExecuteResult>, AbortController>();
-  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && nodeResolution?.enabled ? { ...definition, variantSet: { kind: "node-project", variants: nodeVariants.map(({ version, executable, npmCli, npxCli }) => ({ version, executable, npmCli, npxCli })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
+  const snapshot = (): RuntimeEnvironment => ({ platform, arch: process.arch, cwd: roots[0]!, programs: Object.fromEntries(Object.entries(programs).map(([name, definition]) => [name, name === "node" && (nodeResolution?.enabled || projectNode) ? { ...definition, variantSet: { kind: "node-project", variants: nodeVariants.map(({ version, executable, npmCli, npxCli }) => ({ version, executable, npmCli, npxCli })), fallbackExecutable: definition.executable } } : { ...definition }])), mode: configured ? "configured" : "automatic-discovery", roots: [...roots], environmentNames: Object.keys(environment).sort() });
   return { async inspectEnvironment() { return snapshot(); }, execute(request) {
     if (closing) return Promise.reject(new Error("RUNTIME_CLOSING"));
     if (active.size >= maxConcurrentExecutions) return Promise.reject(new Error("CONCURRENCY_LIMIT"));
@@ -177,7 +188,6 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
     const execution = (async (): Promise<ExecuteResult & { artifact: ArtifactStatus }> => {
       const definition = programs[request.program]; if (!definition) throw new Error(`PROGRAM_NOT_REGISTERED: ${request.program}`);
       const args = [...(request.args ?? [])]; if (args.length > MAX_ARGS || args.some(argument => argument.includes("\0") || Buffer.byteLength(argument) > MAX_ARG_BYTES) || args.reduce((size, argument) => size + Buffer.byteLength(argument), 0) > MAX_ARG_TOTAL_BYTES) throw new Error("INVALID_ARGUMENT");
-      if (definition.kind === "cmd-script" && args.some(argument => !cmdScriptArgumentIsSafe(argument))) throw new Error("UNSAFE_CMD_SCRIPT_ARGUMENT");
       try { const current = await Promise.all(roots.map(async root => { const info = await stat(root); return `${info.dev}:${info.ino}`; })); if (current.some((identity, index) => identity !== rootIdentities[index])) throw new Error(); } catch { throw new Error("ROOT_UNAVAILABLE"); }
       const policy = policies[request.program] ?? {}; const timeoutMs = effectiveTimeoutMs(policy, options.defaultTimeoutMs, request.timeoutMs); if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > Math.min(policy.maxTimeoutMs ?? MAX_DEFAULT_TIMEOUT_MS, MAX_DEFAULT_TIMEOUT_MS)) throw new Error("INVALID_TIMEOUT");
       if (request.input !== undefined && (!policy.allowStdin || Buffer.byteLength(request.input) > MAX_INPUT_BYTES)) throw new Error("INVALID_INPUT");
@@ -186,20 +196,23 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       let cwd: string; try { cwd = await realpath(wanted); } catch { throw new Error("CWD_NOT_FOUND"); }
       if (!roots.some(root => isWithinRoot(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
       const baseEnvironment = plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
-      let selection = request.program === "node" && nodeResolution?.enabled ? await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, definition) : { program: definition };
+      const projectRoot = enabledProjectRoots.find(root => isWithinRoot(root, cwd));
+      const resolveNode = (fallback: RegisteredProgram): Promise<NodeSelection> => projectNode && projectRoot ? resolveProjectNodeV2(cwd, projectRoot, nodeVariants, fallback, projectNode.defaultVersion) : nodeResolution?.enabled ? projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, fallback) : Promise.resolve({ program: fallback });
+      let selection: NodeSelection = request.program === "node" ? await resolveNode(definition) : { program: definition };
       let selectedVariant = selection.variant;
       let childEnvironment: NodeJS.ProcessEnv = baseEnvironment;
-      if ((request.program === "npm" || request.program === "npx") && nodeResolution?.enabled && programs.node) {
-        const nodeSelection = await projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, programs.node);
+      if ((request.program === "npm" || request.program === "npx") && (nodeResolution?.enabled || projectRoot) && programs.node) {
+        const nodeSelection = await resolveNode(programs.node);
         if (nodeSelection.variant) {
           const cli = request.program === "npm" ? nodeSelection.variant.npmCli : nodeSelection.variant.npxCli;
-          if (!cli) throw new Error("PROJECT_NPM_UNAVAILABLE");
+          if (!cli) throw new Error(request.program === "npm" ? "PROJECT_NPM_UNAVAILABLE" : "PROJECT_NPX_UNAVAILABLE");
           selectedVariant = nodeSelection.variant;
           selection = { program: { ...nodeSelection.program, logicalName: request.program }, selection: { ...nodeSelection.selection!, logicalName: request.program, adapter: "npm-cli" } };
           args.splice(0, 0, cli);
           childEnvironment = withNodePath(baseEnvironment, nodeSelection.program, platform);
         }
-      } else if (selection.program.logicalName === "node" && selection.program.executable !== definition.executable) childEnvironment = withNodePath(baseEnvironment, selection.program, platform);
+      } else if (selection.variant) childEnvironment = withNodePath(baseEnvironment, selection.program, platform);
+      if (selection.program.argumentSemantics === "cmd-reparsed" && args.some(argument => !cmdScriptArgumentIsSafe(argument))) throw new Error("UNSAFE_CMD_SCRIPT_ARGUMENT");
       if (selectedVariant) await revalidateNodeVariant(selectedVariant, platform);
       const artifactPolicy = policy.artifactPolicy ?? "on-truncation"; let spool: Awaited<ReturnType<typeof artifacts.spool>> | undefined; let spoolAttemptFailed = false;
       if (artifactPolicy !== "never") try { spool = await artifacts.spool(); } catch { spoolAttemptFailed = true; }
