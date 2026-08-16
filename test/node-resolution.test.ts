@@ -177,16 +177,19 @@ test("v2 active manager follows link changes without restart and exact selector 
   } finally { await instance.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
-test("v2 active manager fails closed for missing nonlink and unmatched targets", async () => {
+test("v2 active manager fails closed for authoritative missing nonlink broken and unmatched links", async () => {
   const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-invalid-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); const link = join(root, "current");
   const create = () => createCommandRuntime({ roots: [root], environment: { HOME: root, PATH: dirname(execPath) }, manifest: manifestV2(root, project, "22.2.0", undefined, { whenNoSelector: "active-manager", activeManagerLinks: [link] }) });
-  let instance = await create(); try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE/); } finally { await instance.close(); }
-  await writeFile(link, "not-link"); instance = await create(); try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE/); } finally { await instance.close(); }
-  await rm(link); const outside = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-outside-")); await symlink(outside, link, process.platform === "win32" ? "junction" : "dir"); instance = await create(); try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE/); } finally { await instance.close(); await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+  const rejects = async () => { const instance = await create(); try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE/); } finally { await instance.close(); } };
+  await rejects();
+  await writeFile(link, "not-link"); await rejects(); await rm(link);
+  if (process.platform !== "win32") { await symlink(join(root, "missing-target"), link, "dir"); await rejects(); await rm(link); }
+  const outside = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-outside-")); await symlink(outside, link, process.platform === "win32" ? "junction" : "dir"); try { await rejects(); } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
 
 test("v2 active manager manifest is strict and default behavior is unchanged", async () => {
   assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0", whenNoSelector: "active-manager" }, programs: {} }), /activeManagerLinks/);
+  assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0", whenNoSelector: "active-manager", activeManagerLinks: ["/first", "/second"] }, programs: {} }), /activeManagerLinks/);
   assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0", whenNoSelector: "other" }, programs: {} }), /whenNoSelector/);
   const parsed = parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0" }, programs: {} }); assert.equal(parsed.projectNode?.whenNoSelector, "default-version");
 });

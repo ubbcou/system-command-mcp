@@ -43,7 +43,7 @@ export function parseProjectNodeResolution(value: unknown, path: string): Projec
   if (whenNoSelector !== 'default-version' && whenNoSelector !== 'active-manager') throw new Error(`INVALID_MANIFEST: ${path}.whenNoSelector`);
   let activeManagerLinks: string[] | undefined;
   if (item.activeManagerLinks !== undefined) {
-    if (!Array.isArray(item.activeManagerLinks) || !item.activeManagerLinks.length || !item.activeManagerLinks.every(link => typeof link === 'string' && (isAbsolute(link) || link.startsWith('~/')))) throw new Error(`INVALID_MANIFEST: ${path}.activeManagerLinks`);
+    if (!Array.isArray(item.activeManagerLinks) || item.activeManagerLinks.length !== 1 || !item.activeManagerLinks.every(link => typeof link === 'string' && (isAbsolute(link) || link.startsWith('~/')))) throw new Error(`INVALID_MANIFEST: ${path}.activeManagerLinks`);
     activeManagerLinks = [...item.activeManagerLinks as string[]];
   }
   if (whenNoSelector === 'active-manager' && !activeManagerLinks) throw new Error(`INVALID_MANIFEST: ${path}.activeManagerLinks`);
@@ -231,19 +231,18 @@ function packageExactSelectors(pkg: Record<string, unknown>): Declaration[] {
 }
 
 async function activeManagerSelection(links: readonly string[], variants: readonly NodeVariant[], fallback: RegisteredProgram, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<NodeSelection> {
+  const configured = links[0];
+  if (!configured) throw new Error('PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE');
   const home = platform === 'win32' ? environment.USERPROFILE ?? homedir() : environment.HOME ?? homedir();
-  for (const configured of links) {
-    const link = configured.startsWith('~/') ? resolve(home, configured.slice(2)) : resolve(configured);
-    try {
-      const info = await lstat(link);
-      if (!info.isSymbolicLink()) continue;
-      const target = await realpath(link);
-      const selected = variants.find(variant => target === variant.versionDirectory || target === variant.executable);
-      if (!selected) continue;
-      return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'active-manager' } };
-    } catch { continue; }
-  }
-  throw new Error('PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE');
+  const link = configured.startsWith('~/') ? resolve(home, configured.slice(2)) : resolve(configured);
+  try {
+    const info = await lstat(link);
+    if (!info.isSymbolicLink()) throw new Error();
+    const target = await realpath(link);
+    const selected = variants.find(variant => target === variant.versionDirectory || target === variant.executable);
+    if (!selected) throw new Error();
+    return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'active-manager' } };
+  } catch { throw new Error('PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE'); }
 }
 
 export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, configuration: Pick<ProjectNodeResolution, 'defaultVersion' | 'whenNoSelector' | 'activeManagerLinks'>, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<NodeSelection> {

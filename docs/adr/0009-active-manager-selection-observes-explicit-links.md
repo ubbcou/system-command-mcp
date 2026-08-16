@@ -6,9 +6,9 @@ Manifest v2 originally used a fixed Project Node Default when an eligible projec
 
 ## Decision
 
-Manifest v2 may set `projectNode.whenNoSelector` to `active-manager` and provide one or more explicit `activeManagerLinks`. The default remains `default-version` for compatibility. Project exact selectors retain priority.
+Manifest v2 may set `projectNode.whenNoSelector` to `active-manager` and provide exactly one explicit `activeManagerLinks` entry. The array shape permits platform replacement configuration, not runtime fallback ordering. The default remains `default-version` for compatibility. Project exact selectors retain priority.
 
-For each eligible Node, npm, or npx request without an exact selector, the Runtime observes the configured links in declaration order. A link must be a filesystem symlink, Windows junction, or other reparse link whose canonical target exactly matches a version directory or Node executable in the immutable startup Program Variant Set. Missing, broken, ordinary directories/files, and unmatched links fail with `PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE`; the fixed default is not used. Project `engines.node` constraints still apply.
+For each eligible Node, npm, or npx request without an exact selector, the configured link is authoritative. It must be a filesystem symlink, Windows junction, or other reparse link whose canonical target exactly matches a version directory or Node executable in the immutable startup Program Variant Set. Missing, broken, ordinary directories/files, and unmatched state immediately fail with `PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE`; no alternative link or fixed default is consulted. Project `engines.node` constraints still apply.
 
 The Runtime never invokes nvm or another manager, changes the link, installs a version, or expands the startup catalog. A manager switch to an already-snapshotted version takes effect on the next request without Server restart. A newly installed version is unavailable until restart. Paired npm and npx continue to use the selected Variant's trusted CLI.
 
