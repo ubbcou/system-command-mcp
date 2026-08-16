@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { access, lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import semver from "semver";
@@ -9,7 +9,7 @@ import type { ProgramSelection, RegisteredProgram } from "./types.js";
 const PACKAGE_LIMIT = 1024 * 1024;
 const VERSION_FILE_LIMIT = 4096;
 export interface NodeResolution { enabled: boolean; installationRoots?: string[]; }
-export interface ProjectNodeResolution { enabledRoots: string[]; installationRoots: string[]; defaultVersion: string; }
+export interface ProjectNodeResolution { enabledRoots: string[]; installationRoots: string[]; defaultVersion: string; whenNoSelector: "default-version" | "active-manager"; activeManagerLinks?: string[]; }
 type NodeIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint };
 export interface NodeVariant { version: string; versionDirectory: string; versionDirectoryIdentity: NodeIdentity; executable: string; executableIdentity: NodeIdentity; npmCli?: string; npmCliIdentity?: NodeIdentity; npxCli?: string; npxCliIdentity?: NodeIdentity; }
 export interface NodeSelection { program: RegisteredProgram; selection?: ProgramSelection; variant?: NodeVariant; }
@@ -31,7 +31,7 @@ export function parseProjectNodeResolution(value: unknown, path: string): Projec
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`INVALID_MANIFEST: ${path} must be an object`);
   const item = value as Record<string, unknown>;
-  for (const key of Object.keys(item)) if (!['enabledRoots', 'installationRoots', 'defaultVersion'].includes(key)) throw new Error(`INVALID_MANIFEST: unknown field ${path}.${key}`);
+  for (const key of Object.keys(item)) if (!['enabledRoots', 'installationRoots', 'defaultVersion', 'whenNoSelector', 'activeManagerLinks'].includes(key)) throw new Error(`INVALID_MANIFEST: unknown field ${path}.${key}`);
   const paths = (key: 'enabledRoots' | 'installationRoots'): string[] => {
     const entries = item[key];
     if (!Array.isArray(entries) || !entries.length || !entries.every(root => typeof root === 'string' && (isAbsolute(root) || root.startsWith('~/')))) throw new Error(`INVALID_MANIFEST: ${path}.${key}`);
@@ -39,7 +39,15 @@ export function parseProjectNodeResolution(value: unknown, path: string): Projec
   };
   const defaultVersion = item.defaultVersion;
   if (typeof defaultVersion !== 'string' || !version(defaultVersion)) throw new Error(`INVALID_MANIFEST: ${path}.defaultVersion`);
-  return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: version(defaultVersion)! };
+  const whenNoSelector = item.whenNoSelector ?? 'default-version';
+  if (whenNoSelector !== 'default-version' && whenNoSelector !== 'active-manager') throw new Error(`INVALID_MANIFEST: ${path}.whenNoSelector`);
+  let activeManagerLinks: string[] | undefined;
+  if (item.activeManagerLinks !== undefined) {
+    if (!Array.isArray(item.activeManagerLinks) || item.activeManagerLinks.length !== 1 || !item.activeManagerLinks.every(link => typeof link === 'string' && (isAbsolute(link) || link.startsWith('~/')))) throw new Error(`INVALID_MANIFEST: ${path}.activeManagerLinks`);
+    activeManagerLinks = [...item.activeManagerLinks as string[]];
+  }
+  if (whenNoSelector === 'active-manager' && !activeManagerLinks) throw new Error(`INVALID_MANIFEST: ${path}.activeManagerLinks`);
+  return { enabledRoots: paths('enabledRoots'), installationRoots: paths('installationRoots'), defaultVersion: version(defaultVersion)!, whenNoSelector, activeManagerLinks };
 }
 
 export function effectiveNodeInstallationRoots(configuration: Pick<NodeResolution, "installationRoots">, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
@@ -222,7 +230,26 @@ function packageExactSelectors(pkg: Record<string, unknown>): Declaration[] {
   return exact;
 }
 
-export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, defaultVersion: string): Promise<NodeSelection> {
+type ReadActiveLink = (path: string) => Promise<string>;
+export async function activeManagerTarget(link: string, read: ReadActiveLink = readlink): Promise<string> {
+  const captured = await read(link);
+  return realpath(isAbsolute(captured) ? captured : resolve(dirname(link), captured));
+}
+
+async function activeManagerSelection(links: readonly string[], variants: readonly NodeVariant[], fallback: RegisteredProgram, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<NodeSelection> {
+  const configured = links[0];
+  if (!configured) throw new Error('PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE');
+  const home = platform === 'win32' ? environment.USERPROFILE ?? homedir() : environment.HOME ?? homedir();
+  const link = configured.startsWith('~/') ? resolve(home, configured.slice(2)) : resolve(configured);
+  try {
+    const target = await activeManagerTarget(link);
+    const selected = variants.find(variant => target === variant.versionDirectory || target === variant.executable);
+    if (!selected) throw new Error();
+    return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'active-manager' } };
+  } catch { throw new Error('PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE'); }
+}
+
+export async function resolveProjectNodeV2(cwd: string, root: string, variants: readonly NodeVariant[], fallback: RegisteredProgram, configuration: Pick<ProjectNodeResolution, 'defaultVersion' | 'whenNoSelector' | 'activeManagerLinks'>, environment: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<NodeSelection> {
   let directory = cwd;
   const ranges: Declaration[] = [];
   let nearestExact: Declaration[] | undefined;
@@ -248,8 +275,12 @@ export async function resolveProjectNodeV2(cwd: string, root: string, variants: 
     if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
     return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: found.source } };
   }
-  if (!defaultVersion) return { program: fallback };
-  const selected = variants.find(item => item.version === defaultVersion);
+  if (configuration.whenNoSelector === 'active-manager') {
+    const selected = await activeManagerSelection(configuration.activeManagerLinks ?? [], variants, fallback, environment, platform);
+    if (ranges.some(range => !semver.satisfies(selected.variant!.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
+    return selected;
+  }
+  const selected = variants.find(item => item.version === configuration.defaultVersion);
   if (!selected) throw new Error('PROJECT_NODE_VERSION_UNAVAILABLE: manifest#projectNode.defaultVersion');
   if (ranges.some(range => !semver.satisfies(selected.version, range.requirement))) throw new Error('PROJECT_NODE_RANGE_UNSATISFIED');
   return { program: { ...fallback, executable: selected.executable, kind: 'native', argumentSemantics: 'literal' }, variant: selected, selection: { logicalName: fallback.logicalName, executable: selected.executable, version: selected.version, requirement: selected.version, source: 'manifest#projectNode.defaultVersion' } };

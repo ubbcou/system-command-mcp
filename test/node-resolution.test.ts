@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { execPath } from "node:process";
 import test from "node:test";
 import { createCommandRuntime, parseProgramManifest } from "../src/runtime.js";
+import { activeManagerTarget } from "../src/node-resolution.js";
 
 const binaryName = process.platform === "win32" ? "node.exe" : "node";
 async function node(root: string, version: string, npm = true): Promise<void> {
@@ -13,7 +14,7 @@ async function node(root: string, version: string, npm = true): Promise<void> {
   if (npm) { const cli = join(root, version, "node_modules", "npm", "bin"); await mkdir(cli, { recursive: true }); await writeFile(join(cli, "npm-cli.js"), "console.log(process.version, process.argv.slice(2).join(','))"); await writeFile(join(cli, "npx-cli.js"), "console.log(process.version, process.argv.slice(2).join(','))"); }
 }
 function manifest(root: string, programs: Record<string, unknown> = { node: { candidates: [execPath], required: true } }) { return { version: 1, nodeResolution: { enabled: true, installationRoots: [root] }, allowInheritedPath: true, programs }; }
-function manifestV2(root: string, projectRoot = root, defaultVersion?: string, programs: Record<string, unknown> = { node: { candidates: [execPath], required: true } }) { return { version: 2, projectNode: { enabledRoots: [projectRoot], installationRoots: [root], ...(defaultVersion ? { defaultVersion } : {}) }, allowInheritedPath: true, programs }; }
+function manifestV2(root: string, projectRoot = root, defaultVersion?: string, programs: Record<string, unknown> = { node: { candidates: [execPath], required: true } }, projectNode: Record<string, unknown> = {}) { return { version: 2, projectNode: { enabledRoots: [projectRoot], installationRoots: [root], ...(defaultVersion ? { defaultVersion } : {}), ...projectNode }, allowInheritedPath: true, programs }; }
 
 async function runtime(root: string, programs?: Record<string, unknown>) { return createCommandRuntime({ roots: [root], environment: { Path: dirname(execPath), PATH: dirname(execPath) }, manifest: manifest(root, programs) }); }
 async function runtimeV2(root: string, projectRoot = root, defaultVersion?: string, programs?: Record<string, unknown>) { return createCommandRuntime({ roots: [root], environment: { Path: dirname(execPath), PATH: dirname(execPath) }, manifest: manifestV2(root, projectRoot, defaultVersion, programs) }); }
@@ -162,6 +163,42 @@ test("paired native npm accepts literal metacharacters and selected fallback pre
     await assert.rejects(instance.execute({ program: "npm", args: ["a&b"], cwd: root }), /UNSAFE_CMD_SCRIPT_ARGUMENT/);
     const path = await instance.execute({ program: "node", args: ["-e", "process.stdout.write(process.env.PATH ?? process.env.Path ?? '')"], cwd: project }); assert.equal(path.stdout.text.split(process.platform === "win32" ? ";" : ":")[0], dirname(selected));
   } finally { await instance.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("active manager target linearizes at the captured readlink value", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-linear-")); const first = join(root, "v20.1.0"); const second = join(root, "v22.2.0"); await mkdir(first); await mkdir(second); const link = join(root, "current"); let current = first;
+  const read = async () => { const captured = current; current = second; return captured; };
+  try { assert.equal(await activeManagerTarget(link, read), await realpath(first)); assert.equal(await activeManagerTarget(link, read), await realpath(second)); } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("v2 active manager follows link changes without restart and exact selector wins", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-")); await node(root, "v20.1.0"); await node(root, "v22.2.0");
+  const project = join(root, "project"); await mkdir(project); const link = join(root, "current"); await symlink(join(root, "v20.1.0"), link, process.platform === "win32" ? "junction" : "dir");
+  const instance = await createCommandRuntime({ roots: [root], environment: { HOME: root, PATH: dirname(execPath) }, manifest: manifestV2(root, project, "22.2.0", { node: { candidates: [execPath], required: true }, npm: { candidates: [execPath] } }, { whenNoSelector: "active-manager", activeManagerLinks: [link] }) });
+  try {
+    let result = await instance.execute({ program: "node", cwd: project }); assert.equal(result.programSelection?.version, "20.1.0"); assert.equal(result.programSelection?.source, "active-manager");
+    await rm(link); await symlink(join(root, "v22.2.0"), link, process.platform === "win32" ? "junction" : "dir"); result = await instance.execute({ program: "node", cwd: project }); assert.equal(result.programSelection?.version, "22.2.0");
+    const npm = await instance.execute({ program: "npm", args: ["ok"], cwd: project }); assert.equal(npm.programSelection?.version, "22.2.0"); assert.equal(npm.programSelection?.adapter, "npm-cli");
+    await writeFile(join(project, ".nvmrc"), "20.1.0"); result = await instance.execute({ program: "node", cwd: project }); assert.equal(result.programSelection?.version, "20.1.0"); assert.equal(result.programSelection?.source, ".nvmrc");
+    await writeFile(join(project, "package.json"), JSON.stringify({ engines: { node: ">=22" } })); await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_RANGE_UNSATISFIED/);
+  } finally { await instance.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("v2 active manager fails closed for authoritative missing nonlink broken and unmatched links", async () => {
+  const root = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-invalid-")); await node(root, "v22.2.0"); const project = join(root, "project"); await mkdir(project); const link = join(root, "current");
+  const create = () => createCommandRuntime({ roots: [root], environment: { HOME: root, PATH: dirname(execPath) }, manifest: manifestV2(root, project, "22.2.0", undefined, { whenNoSelector: "active-manager", activeManagerLinks: [link] }) });
+  const rejects = async () => { const instance = await create(); try { await assert.rejects(instance.execute({ program: "node", cwd: project }), /PROJECT_NODE_ACTIVE_VERSION_UNAVAILABLE/); } finally { await instance.close(); } };
+  await rejects();
+  await writeFile(link, "not-link"); await rejects(); await rm(link);
+  if (process.platform !== "win32") { await symlink(join(root, "missing-target"), link, "dir"); await rejects(); await rm(link); }
+  const outside = await mkdtemp(join(tmpdir(), "system-command-mcp-node-active-outside-")); await symlink(outside, link, process.platform === "win32" ? "junction" : "dir"); try { await rejects(); } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test("v2 active manager manifest is strict and default behavior is unchanged", async () => {
+  assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0", whenNoSelector: "active-manager" }, programs: {} }), /activeManagerLinks/);
+  assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0", whenNoSelector: "active-manager", activeManagerLinks: ["/first", "/second"] }, programs: {} }), /activeManagerLinks/);
+  assert.throws(() => parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0", whenNoSelector: "other" }, programs: {} }), /whenNoSelector/);
+  const parsed = parseProgramManifest({ version: 2, projectNode: { enabledRoots: ["/x"], installationRoots: ["/x"], defaultVersion: "22.2.0" }, programs: {} }); assert.equal(parsed.projectNode?.whenNoSelector, "default-version");
 });
 
 test("v2 authorizes roots and supports platform override", async () => {

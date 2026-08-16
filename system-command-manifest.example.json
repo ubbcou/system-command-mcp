@@ -33,7 +33,9 @@
       "projectNode": {
         "enabledRoots": ["C:/Users/example/src"],
         "installationRoots": ["C:/Users/example/AppData/Roaming/nvm"],
-        "defaultVersion": "22.14.0"
+        "defaultVersion": "22.14.0",
+        "whenNoSelector": "active-manager",
+        "activeManagerLinks": ["C:/Program Files/nodejs"]
       }
     },
     "darwin": {
@@ -41,7 +43,8 @@
       "projectNode": {
         "enabledRoots": ["/Users/example/src"],
         "installationRoots": ["/Users/example/.nvm/versions/node"],
-        "defaultVersion": "22.14.0"
+        "defaultVersion": "22.14.0",
+        "whenNoSelector": "default-version"
       }
     }
   }
