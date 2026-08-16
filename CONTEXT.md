@@ -221,5 +221,9 @@ Supported project metadata inside a Project Node Boundary that provides either a
 _Avoid_: Manifest override, watched config, active version file
 
 **Project Node Default**:
-The exact Node version declared by Manifest v2 for eligible requests that have no project exact selection; it is checked against project compatibility constraints and is unrelated to a version manager's default or alias.
+The exact Node version declared by Manifest v2 for eligible requests that have no project exact selection and use default-version selection; it is checked against project compatibility constraints and is unrelated to a version manager's default or alias.
 _Avoid_: Manager default, active version, fallback Candidate
+
+**Active Manager Selection**:
+The optional Manifest v2 policy that, when no Project Node exact selection exists, observes an explicitly configured manager-owned link on each Execution Request and selects the matching member of the immutable startup Program Variant Set without invoking or mutating the manager.
+_Avoid_: Automatic install, nvm use, PATH discovery, manager default

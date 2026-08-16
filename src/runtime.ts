@@ -197,7 +197,7 @@ export async function createCommandRuntime(options: CommandRuntimeOptions): Prom
       if (!roots.some(root => isWithinRoot(root, cwd))) throw new Error("CWD_NOT_ALLOWED");
       const baseEnvironment = plan?.programEnvironment(definitions[request.program]!) ?? { ...environment };
       const projectRoot = enabledProjectRoots.find(root => isWithinRoot(root, cwd));
-      const resolveNode = (fallback: RegisteredProgram): Promise<NodeSelection> => projectNode && projectRoot ? resolveProjectNodeV2(cwd, projectRoot, nodeVariants, fallback, projectNode.defaultVersion) : nodeResolution?.enabled ? projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, fallback) : Promise.resolve({ program: fallback });
+      const resolveNode = (fallback: RegisteredProgram): Promise<NodeSelection> => projectNode && projectRoot ? resolveProjectNodeV2(cwd, projectRoot, nodeVariants, fallback, projectNode, input, platform) : nodeResolution?.enabled ? projectNodeSelection(cwd, roots.find(root => isWithinRoot(root, cwd))!, nodeVariants, fallback) : Promise.resolve({ program: fallback });
       let selection: NodeSelection = request.program === "node" ? await resolveNode(definition) : { program: definition };
       let selectedVariant = selection.variant;
       let childEnvironment: NodeJS.ProcessEnv = baseEnvironment;
